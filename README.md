@@ -16,6 +16,17 @@ Fresh, isolated Chromium price observations and an on-demand private Chrome desk
 
 A new browser context is created for every automated product check. Batch jobs reuse the Chromium process while keeping cookies, cache and local storage isolated between products.
 
+## Cloudflare Git deployment
+
+The repository includes a small Worker configured in `wrangler.jsonc`. This exists so a Cloudflare Git-connected project can deploy successfully and expose a basic status/health endpoint.
+
+It does **not** host the interactive browser. Do not assign `privatebrowser.laptopvalue.co.uk` as a custom domain or Worker route for this status Worker. That hostname belongs to the remotely managed Cloudflare Tunnel whose origin is `http://localhost:6080` during an active GitHub Actions browser session.
+
+The status Worker provides:
+
+- `/` — a short service explanation;
+- `/health` — JSON health information.
+
 ## Automated price fetching
 
 ### From ChatGPT through an owner issue
