@@ -1,0 +1,49 @@
+name: Daily price scan
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    if: github.repository_owner == 'feldaron'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm install
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Scan shard
+        run: npm run fetch:batch
+        env:
+          TARGETS_FILE: config/targets.json
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: 4
+          REQUEST_DELAY_MS: 1500
+          OUTPUT_DIRECTORY: results/shard-${{ matrix.shard }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_TABLE: ${{ vars.SUPABASE_TABLE }}
+          ALLOWED_HOSTS: ${{ vars.ALLOWED_HOSTS }}
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-price-evidence-${{ github.run_id }}-shard-${{ matrix.shard }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
