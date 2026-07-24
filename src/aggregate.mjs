@@ -31,7 +31,7 @@ export function aggregateAttempts(attempts, expected = {}) {
   const representative = attempts.find((attempt) => attempt.status === "success") ?? attempts[0];
   const eligible = status === "success"
     && Boolean(representative.retailerItemNumber)
-    && Boolean(representative.manufacturerSku || representative.ean)
+    && Boolean(representative.identityChecks?.strongIdentity ?? (representative.manufacturerSku || representative.ean))
     && representative.mainPurchasePrice !== null
     && (representative.structuredOfferPrice === null
       || Math.abs(representative.mainPurchasePrice - representative.structuredOfferPrice) < 0.009);
@@ -69,6 +69,7 @@ export function aggregateAttempts(attempts, expected = {}) {
     conflicts: unique(conflicts),
     evidenceUrls: unique(attempts.flatMap((attempt) => attempt.evidenceUrls)),
     provenance: representative.provenance,
+    identityChecks: representative.identityChecks,
     expected: {
       itemNumber: expected.itemNumber ?? null,
       mpn: expected.mpn ?? null,
