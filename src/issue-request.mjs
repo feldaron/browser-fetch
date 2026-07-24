@@ -87,6 +87,20 @@ async function main() {
           : null,
         result.manufacturerSku ? `**MPN:** \`${result.manufacturerSku}\`` : null,
         result.ean ? `**EAN:** \`${result.ean}\`` : null,
+        result.cpu ? `**CPU:** ${result.cpu}` : null,
+        result.ram ? `**RAM:** ${result.ram}` : null,
+        result.storage ? `**Storage:** ${result.storage}` : null,
+        result.display ? `**Display:** ${result.display}` : null,
+        result.colour ? `**Colour:** ${result.colour}` : null,
+        result.identityChecks?.identityBasis?.length
+          ? `**Identity basis:** ${result.identityChecks.identityBasis.map((value) => `\`${value}\``).join(", ")}`
+          : null,
+        result.identityChecks?.expectedMpn && !result.identityChecks.mpnPublished
+          ? `**MPN:** not published on this retailer page; expected value retained as external identity evidence`
+          : null,
+        result.identityChecks?.expectedEan && !result.identityChecks.eanPublished
+          ? `**EAN:** not published on this retailer page; expected value retained as external identity evidence`
+          : null,
         ...catalogueSummary(result),
         `**Eligible for controlled import:** ${result.eligible ? "yes" : "no"}`,
         result.conflicts?.length
