@@ -21,7 +21,9 @@ jobs:
           archive="$(sed -n '/^[[:space:]]*H4sI/{s/^[[:space:]]*//;p;q;}' .github/workflows/bootstrap.yml)"
           test -n "$archive"
           printf '%s' "$archive" | base64 -d | tar -xz
-          rm .github/workflows/bootstrap.yml .github/workflows/run-bootstrap.yml
+          # The default Actions token cannot create or update workflow files.
+          # Restore the current workflow directory; those files are added separately.
+          git restore --source=HEAD -- .github/workflows
       - name: Commit generated repository
         shell: bash
         run: |
