@@ -5,7 +5,8 @@ import { runCatalogue } from "./catalogue.mjs";
 import { verifyProduct } from "./runner.mjs";
 
 function integer(value, fallback, minimum, maximum) {
-  const parsed = Number.parseInt(String(value ?? fallback), 10);
+  const source = value === null || value === undefined || value === "" ? fallback : value;
+  const parsed = Number.parseInt(String(source), 10);
   if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) throw new Error(`Expected integer from ${minimum} to ${maximum}, got ${value}`);
   return parsed;
 }
