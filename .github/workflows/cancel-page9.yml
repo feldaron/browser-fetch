@@ -1,0 +1,20 @@
+name: Cancel oversized page-9 crawl
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: owner-browser-fetch-9
+  cancel-in-progress: true
+
+jobs:
+  cancel:
+    if: github.event.issue.user.login == github.repository_owner && github.event.issue.title == '[cancel-page9]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo 'Cancelled the unbounded page-9 crawl through its shared concurrency group.'
