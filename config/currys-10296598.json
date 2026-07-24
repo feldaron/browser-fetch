@@ -1,0 +1,11 @@
+{
+  "mode": "specific-product",
+  "retailer": "currys",
+  "productUrl": "https://www.currys.co.uk/products/acer-swift-16-ai-16-laptop-copilot-pc-intel-core-ultra-x7-1-tb-ssd-grey-10296598.html",
+  "expectedItemNumber": "10296598",
+  "expectedMpn": "NX.JU1EK.001",
+  "expectedEan": "4711474906946",
+  "expectedPrice": 1799,
+  "repeatCount": 6,
+  "headed": true
+}

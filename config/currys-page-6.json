@@ -1,0 +1,10 @@
+{
+  "mode": "controlled-crawl",
+  "retailer": "currys",
+  "catalogueUrl": "https://www.currys.co.uk/computing/laptops/laptops/windows-laptops?searchTerm=laptop",
+  "startPage": 6,
+  "endPage": 6,
+  "pageSize": 20,
+  "repeatCount": 2,
+  "headed": true
+}

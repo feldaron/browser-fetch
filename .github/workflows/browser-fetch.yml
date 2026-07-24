@@ -1,0 +1,145 @@
+name: Browser fetch and verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Verification mode
+        required: true
+        default: specific-product
+        type: choice
+        options:
+          - specific-product
+          - catalogue-discovery
+          - controlled-crawl
+      retailer:
+        description: Retailer adapter
+        required: true
+        default: currys
+        type: choice
+        options:
+          - currys
+      product_url:
+        description: Product URL for specific-product mode
+        required: false
+        type: string
+      catalogue_url:
+        description: Catalogue URL for discovery or crawl mode
+        required: false
+        default: https://www.currys.co.uk/computing/laptops/laptops/windows-laptops?searchTerm=laptop
+        type: string
+      start_page:
+        description: First catalogue page
+        required: false
+        default: "6"
+        type: string
+      end_page:
+        description: Last catalogue page
+        required: false
+        default: "6"
+        type: string
+      page_size:
+        description: Products per catalogue page
+        required: false
+        default: "20"
+        type: string
+      expected_item_number:
+        description: Exact retailer item number
+        required: false
+        type: string
+      expected_mpn:
+        description: Exact manufacturer SKU or MPN
+        required: false
+        type: string
+      expected_ean:
+        description: Exact EAN or GTIN
+        required: false
+        type: string
+      expected_price:
+        description: Expected main purchase price, without currency symbol
+        required: false
+        type: string
+      repeat_count:
+        description: Isolated Chrome loads per product, 1-8
+        required: true
+        default: "3"
+        type: string
+      headed:
+        description: Run headed Google Chrome under Xvfb
+        required: true
+        default: true
+        type: boolean
+      save_debug:
+        description: Save HTML and screenshots even without a conflict
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-fetch-${{ inputs.retailer }}-${{ inputs.mode }}
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Confirm runner Google Chrome
+        run: google-chrome --version
+      - name: Fetch and verify
+        id: fetch
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [[ "${HEADED}" == "true" ]]; then
+            xvfb-run -a npm run browser-fetch
+          else
+            npm run browser-fetch
+          fi
+        env:
+          MODE: ${{ inputs.mode }}
+          RETAILER: ${{ inputs.retailer }}
+          PRODUCT_URL: ${{ inputs.product_url }}
+          CATALOGUE_URL: ${{ inputs.catalogue_url }}
+          START_PAGE: ${{ inputs.start_page }}
+          END_PAGE: ${{ inputs.end_page }}
+          PAGE_SIZE: ${{ inputs.page_size }}
+          EXPECTED_ITEM_NUMBER: ${{ inputs.expected_item_number }}
+          EXPECTED_MPN: ${{ inputs.expected_mpn }}
+          EXPECTED_EAN: ${{ inputs.expected_ean }}
+          EXPECTED_PRICE: ${{ inputs.expected_price }}
+          REPEAT_COUNT: ${{ inputs.repeat_count }}
+          HEADED: ${{ inputs.headed }}
+          SAVE_DEBUG: ${{ inputs.save_debug }}
+          RESULTS_DIR: results
+      - name: Add compact result to job summary
+        if: always()
+        run: |
+          if [[ -f results/summary.json ]]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat results/summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'No summary JSON was produced.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload evidence and checkpoints
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-fetch-${{ github.run_id }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
+      - name: Preserve verification conclusion
+        if: steps.fetch.outcome == 'failure'
+        run: exit 1

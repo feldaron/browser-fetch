@@ -1,0 +1,46 @@
+name: Owner browser-fetch request
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: owner-browser-fetch-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    if: github.event.issue.user.login == github.repository_owner && startsWith(github.event.issue.title, '[browser-fetch]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Confirm runner Google Chrome
+        run: google-chrome --version
+      - name: Run owner request in headed Chrome
+        id: fetch
+        continue-on-error: true
+        run: xvfb-run -a npm run browser-fetch:issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RESULTS_DIR: results
+      - name: Upload evidence and checkpoints
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-fetch-owner-${{ github.run_id }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Preserve verification conclusion
+        if: steps.fetch.outcome == 'failure'
+        run: exit 1
