@@ -1,0 +1,32 @@
+name: Run repository bootstrap
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/run-bootstrap.yml
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Extract repository archive
+        shell: bash
+        run: |
+          archive="$(sed -n '/^[[:space:]]*H4sI/{s/^[[:space:]]*//;p;q;}' .github/workflows/bootstrap.yml)"
+          test -n "$archive"
+          printf '%s' "$archive" | base64 -d | tar -xz
+          rm .github/workflows/bootstrap.yml .github/workflows/run-bootstrap.yml
+      - name: Commit generated repository
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Build Playwright browser fetch service"
+          git push
