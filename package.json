@@ -1,0 +1,26 @@
+{
+  "name": "browser-fetch",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fresh Chromium price observations for LaptopValue, run on GitHub Actions.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "fetch:one": "tsx src/cli.ts single",
+    "fetch:batch": "tsx src/cli.ts batch",
+    "fetch:issue": "tsx src/cli.ts issue"
+  },
+  "dependencies": {
+    "playwright": "^1.55.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
