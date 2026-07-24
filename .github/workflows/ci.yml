@@ -1,25 +1,28 @@
 name: Validate browser fetch
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: validate-browser-fetch-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install dependencies
-        run: npm install
-      - name: Typecheck
+      - name: Install JavaScript dependencies without browser downloads
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Syntax check
         run: npm run check
-      - name: Test
+      - name: Unit tests
         run: npm test
