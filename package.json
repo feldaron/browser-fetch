@@ -10,6 +10,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
+    "deploy:status": "wrangler deploy",
     "fetch:one": "tsx src/cli.ts single",
     "fetch:batch": "tsx src/cli.ts batch",
     "fetch:issue": "tsx src/cli.ts issue"
@@ -21,6 +22,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "wrangler": "^4.114.0"
   }
 }
