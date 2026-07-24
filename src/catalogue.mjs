@@ -12,6 +12,31 @@ export function currysCataloguePageUrl(baseUrl, pageNumber, pageSize = 20) {
   return url.toString();
 }
 
+export function selectCurrysProductUrls(hrefs, baseUrl, pageSize = 20) {
+  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error("pageSize must be from 1 to 100");
+  const candidates = [];
+  const seen = new Set();
+
+  for (const href of hrefs ?? []) {
+    if (!href) continue;
+    let url;
+    try {
+      url = validateRetailerUrl(new URL(href, baseUrl).toString(), "currys").toString();
+    } catch {
+      continue;
+    }
+    if (!/\/products\/[^?#]+-\d{8}\.html(?:$|[?#])/.test(url) || seen.has(url)) continue;
+    seen.add(url);
+    candidates.push(url);
+  }
+
+  return {
+    productUrls: candidates.slice(0, pageSize),
+    candidateCount: candidates.length,
+    capped: candidates.length > pageSize,
+  };
+}
+
 export async function discoverCurrysPage(baseUrl, pageNumber, options = {}) {
   const pageSize = Number(options.pageSize ?? 20);
   const pageUrl = currysCataloguePageUrl(baseUrl, pageNumber, pageSize);
@@ -29,19 +54,24 @@ export async function discoverCurrysPage(baseUrl, pageNumber, options = {}) {
       return { status: "blocked", pageNumber, requestedUrl: pageUrl, finalUrl: page.url(), httpStatus: response?.status() ?? null, productUrls: [], conflicts: ["catalogue page was blocked"] };
     }
 
-    const hrefs = await page.locator('a[href*="/products/"]').evaluateAll((anchors) => anchors.map((anchor) => anchor.getAttribute("href"))).catch(() => []);
-    const productUrls = [...new Set(hrefs.filter(Boolean).map((href) => new URL(href, page.url()).toString()).filter((url) => /\/products\/[^?#]+-\d{8}\.html(?:$|[?#])/.test(url)))];
+    let hrefs = await page.locator('main a[href*="/products/"]').evaluateAll((anchors) => anchors.map((anchor) => anchor.getAttribute("href"))).catch(() => []);
+    if (hrefs.length === 0) {
+      hrefs = await page.locator('a[href*="/products/"]').evaluateAll((anchors) => anchors.map((anchor) => anchor.getAttribute("href"))).catch(() => []);
+    }
+    const selection = selectCurrysProductUrls(hrefs, page.url(), pageSize);
     return {
-      status: productUrls.length ? "success" : "failed",
+      status: selection.productUrls.length ? "success" : "failed",
       pageNumber,
       requestedUrl: pageUrl,
       finalUrl: page.url(),
       httpStatus: response?.status() ?? null,
-      productUrls,
-      retailerItemNumbers: productUrls.map(currysItemNumber),
+      productUrls: selection.productUrls,
+      retailerItemNumbers: selection.productUrls.map(currysItemNumber),
+      rawUniqueProductLinkCount: selection.candidateCount,
+      productLinksCappedToPageSize: selection.capped,
       discoveredAt: new Date().toISOString(),
-      verificationMethod: "literal product-card href discovery only; catalogue-card prices ignored",
-      conflicts: productUrls.length ? [] : ["no Currys product-card hrefs were found"],
+      verificationMethod: `literal Currys product href discovery capped to requested page size ${pageSize}; catalogue-card prices ignored`,
+      conflicts: selection.productUrls.length ? [] : ["no Currys product-card hrefs were found"],
     };
   } finally {
     await context.close();
