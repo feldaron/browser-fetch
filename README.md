@@ -1,121 +1,118 @@
 # browser-fetch
 
-Fresh, isolated Chromium price observations and an on-demand private Chrome desktop for LaptopValue, using standard GitHub-hosted Ubuntu runners.
+Public, generic browser-fetching and verification code for the LaptopValue UK laptop-pricing project. It uses Playwright with **Google Chrome** on standard `ubuntu-latest` GitHub-hosted runners. It does not use Vercel and does not contain Supabase credentials, private database exports or internal valuation logic.
 
-## What it does
+## Safety boundary
 
-- Opens each product in a fresh browser context with UK locale and Europe/London timezone.
-- Extracts price candidates from Product JSON-LD, price metadata and visible price elements.
-- Checks an expected SKU and/or EAN before accepting the observation.
-- Records the final URL, HTTP status, product identifiers, availability and a screenshot.
-- Writes JSON evidence to a GitHub Actions artifact.
-- Optionally inserts the same observation into Supabase.
-- Rejects URLs outside an explicit retailer-domain allowlist.
-- Provides a temporary interactive Chrome desktop at `privatebrowser.laptopvalue.co.uk` through Cloudflare Tunnel and Access.
-- Does not attempt to bypass CAPTCHAs or retailer access controls.
+The workflows only visit an explicit retailer hostname allowlist. They do not attempt to bypass CAPTCHAs, Cloudflare challenges, access controls or retailer anti-bot protections. A blocked page is recorded as `blocked` and quarantined.
 
-A new browser context is created for every automated product check. Batch jobs reuse the Chromium process while keeping cookies, cache and local storage isolated between products.
+Fetching is deliberately separate from database writing:
 
-## Cloudflare Git deployment
+1. Chrome produces compact JSON evidence.
+2. Evidence is reviewed or passes strict validation.
+3. A controlled importer outside this public repository writes eligible observations to Supabase.
 
-The repository includes a small Worker configured in `wrangler.jsonc`. This exists so a Cloudflare Git-connected project can deploy successfully and expose a basic status/health endpoint.
+**Encrypted GitHub Actions secrets required for the current fetch workflows: none.**
 
-It does **not** host the interactive browser. Do not assign `privatebrowser.laptopvalue.co.uk` as a custom domain or Worker route for this status Worker. That hostname belongs to the remotely managed Cloudflare Tunnel whose origin is `http://localhost:6080` during an active GitHub Actions browser session.
+No Supabase URL, service-role key or database token should be added to this repository. If direct importing is added later, it must be a separate, disabled-by-default workflow and would require exactly `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` as encrypted Actions secrets.
 
-The status Worker provides:
+## Modes
 
-- `/` — a short service explanation;
-- `/health` — JSON health information.
+### `specific-product`
 
-## Automated price fetching
+Loads one product page in repeated isolated Chrome contexts and verifies:
 
-### From ChatGPT through an owner issue
+- requested, final and canonical URLs;
+- HTTP status and literal retailer item number;
+- product title, manufacturer, family, MPN/SKU and EAN/GTIN;
+- CPU, GPU, RAM, storage, display and colour when present;
+- main purchase-block price, delivery charge, effective price and currency;
+- availability and in-stock state;
+- JSON-LD/structured-offer price;
+- identity and price conflicts, evidence URLs, provenance and timestamp.
 
-Create an issue whose title begins with `[fetch]` and whose entire body is JSON:
+The main visible purchase price is mandatory. JSON-LD is a cross-check, not a substitute. A visible/structured disagreement is a `conflict`, never an eligible observation.
+
+### `catalogue-discovery`
+
+Loads catalogue pages and records the literal product-card `href` values. Catalogue-card prices are ignored.
+
+### `controlled-crawl`
+
+Discovers literal product URLs page by page, then verifies each individual product page. A checkpoint JSON file is rewritten after discovery and after each product, so a partial artifact shows exactly where the run stopped. Resume by starting a new run at the first incomplete catalogue page.
+
+## Statuses
+
+- `success` — evidence agrees and identity is strong enough.
+- `conflict` — identity, price or repeated-load evidence disagrees.
+- `blocked` — retailer protection or an access block was encountered.
+- `failed` — navigation or required evidence could not be obtained.
+
+Only `success` results with `eligible: true` may enter a controlled import step. Screenshots and HTML are saved only for conflicts, blocks, failures or an explicitly disputed product.
+
+## GitHub Actions
+
+Open **Actions → Browser fetch and verify → Run workflow**. The workflow accepts retailer, mode, catalogue URL, start/end page, optional product URL, exact identifiers, expected price, repeat count and headed/headless selection.
+
+Concurrency controls prevent overlapping runs of the same retailer/mode. Standard runners are used; chargeable larger runners are not configured. There is no scheduled crawl, which avoids unnecessary GitHub Actions minutes.
+
+### Owner issue request
+
+An owner-authored issue can start the same verifier. The title must begin `[browser-fetch]` and the body must be JSON. This is useful for controlled automation without exposing secrets.
+
+Protected Currys verification example:
 
 ```json
 {
-  "id": "catalogue-record-id",
-  "retailer": "Currys",
-  "url": "https://www.currys.co.uk/your-product-page",
-  "expectedSku": "EXACT-SKU",
-  "expectedEan": "1234567890123"
+  "mode": "specific-product",
+  "retailer": "currys",
+  "productUrl": "https://www.currys.co.uk/products/acer-swift-16-ai-16-laptop-copilot-pc-intel-core-ultra-x7-1-tb-ssd-grey-10296598.html",
+  "expectedItemNumber": "10296598",
+  "expectedMpn": "NX.JU1EK.001",
+  "expectedEan": "4711474906946",
+  "expectedPrice": 1799,
+  "repeatCount": 6,
+  "headed": true
 }
 ```
 
-Only an issue opened by the repository owner is allowed to start the job. The workflow posts the structured result back as an issue comment and closes the issue.
-
-### Manually
-
-Open **Actions → Fetch one product price → Run workflow** and enter a product URL plus its exact SKU and/or EAN.
-
-### Daily batch
-
-Add targets to `config/targets.json`. The scheduled workflow runs daily at 05:17 UTC and divides the list across four standard Ubuntu jobs.
-
-## Interactive private browser
-
-The **Private browser session** workflow starts a fresh headed Chromium desktop and makes it available at:
-
-`https://privatebrowser.laptopvalue.co.uk`
-
-The interface uses noVNC locally and a remotely managed Cloudflare Tunnel. Cloudflare Access must restrict the hostname to the intended user before the tunnel token is configured.
-
-A session can be started manually from GitHub Actions or by creating an owner-authored issue titled `[browser]` with this JSON body:
+Currys page-6 crawl example:
 
 ```json
 {
-  "startUrl": "https://www.currys.co.uk/",
-  "durationMinutes": 60
+  "mode": "controlled-crawl",
+  "retailer": "currys",
+  "catalogueUrl": "https://www.currys.co.uk/computing/laptops/laptops/windows-laptops?searchTerm=laptop",
+  "startPage": 6,
+  "endPage": 6,
+  "pageSize": 20,
+  "repeatCount": 2,
+  "headed": true
 }
 ```
 
-Sessions last between 15 and 300 minutes. Starting a new one cancels the previous session. All browser state is destroyed with the runner.
-
-See [`docs/private-browser-setup.md`](docs/private-browser-setup.md) for the Cloudflare Tunnel, Access and GitHub secret setup.
-
-## Supabase setup
-
-Run `supabase/001_browser_price_observations.sql` in the Supabase SQL editor, then add these repository secrets:
-
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-
-Optional repository variables:
-
-- `SUPABASE_TABLE` — defaults to `browser_price_observations`
-- `ALLOWED_HOSTS` — comma-separated additional approved domains
-
-The service-role key must only be stored as a GitHub Actions secret. Never put it in source code, an issue, a workflow input or `config/targets.json`.
-
-The private desktop additionally requires:
-
-- `CLOUDFLARE_TUNNEL_TOKEN`
-
-## Local use
+## Local validation
 
 ```bash
-npm install
-npx playwright install --with-deps chromium
-TARGET_URL="https://www.currys.co.uk/..." EXPECTED_SKU="..." npm run fetch:one
+npm install --ignore-scripts
+npm run check
+npm test
 ```
 
-Run a target list:
+For a live Chrome check, install Google Chrome and run under a desktop or Xvfb:
 
 ```bash
-TARGETS_FILE=config/targets.json npm run fetch:batch
+MODE=specific-product \
+PRODUCT_URL='https://www.currys.co.uk/products/example-10200000.html' \
+EXPECTED_ITEM_NUMBER=10200000 \
+HEADED=true \
+xvfb-run -a npm run browser-fetch
 ```
 
-## Accuracy rules
+## Currys pagination
 
-An observation is marked `accepted: true` only when:
+Currys page numbers are translated to `start=(page-1)*pageSize` and `sz=pageSize`. With 20 products per page, page 6 uses `start=100&sz=20`.
 
-1. the page is not identified as blocked;
-2. the expected SKU/EAN, when supplied, is found on the rendered page or in structured product data; and
-3. a plausible GBP price is extracted.
+## Protected correction
 
-Generic extraction is deliberately conservative. Retailer-specific extractors should be added before treating this as a complete production pricing system.
-
-## Public-repository safety
-
-Workflows that can access secrets run only from the default repository workflow through `schedule`, `workflow_dispatch`, or owner-authored issues. No workflow with secrets runs untrusted pull-request code. Standard GitHub-hosted runners are used; larger runners are not configured.
+Currys item `10296598` is the Acer Swift 16 AI, MPN `NX.JU1EK.001`, EAN `4711474906946`. The known robust correction is **£1,799**, not £1,599. The included fixture and tests protect that identity and price expectation; a live run still has to verify the current retailer page before any new observation is imported.
