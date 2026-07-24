@@ -10,7 +10,7 @@ function attempt(overrides = {}) {
     canonicalUrl: "https://www.currys.co.uk/products/grey-10296598.html",
     httpStatus: 200,
     retailerItemNumber: "10296598",
-    productTitle: "ACER Swift 16 AI",
+    productTitle: "ACER Swift 16 AI 16-inch Laptop - Intel Core Ultra X7, 1 TB SSD, Grey",
     manufacturer: "ACER",
     modelFamily: "Swift 16 AI",
     manufacturerSku: "NX.JU1EK.001",
@@ -30,6 +30,7 @@ function attempt(overrides = {}) {
     structuredOfferPrice: 1799,
     timestamp: "2026-07-24T00:00:00.000Z",
     verificationMethod: "headed Google Chrome / isolated Playwright context / Currys main purchase block",
+    identityChecks: { strongIdentity: true },
     conflicts: [],
     evidenceUrls: ["https://www.currys.co.uk/products/grey-10296598.html"],
     provenance: {},
@@ -49,4 +50,13 @@ test("quarantines a cross-load price change", () => {
   assert.equal(result.status, "conflict");
   assert.equal(result.eligible, false);
   assert.match(result.conflicts.join(" "), /multiple main prices/);
+});
+
+test("does not treat unrelated broad-body CPU drift as a different product", () => {
+  const result = aggregateAttempts([
+    attempt({ cpu: "AMD Ryzen AI 5 340", ram: "16 GB" }),
+    attempt({ cpu: "Intel Core Ultra 5", ram: "32 GB" }),
+  ]);
+  assert.equal(result.status, "success");
+  assert.equal(result.eligible, true);
 });

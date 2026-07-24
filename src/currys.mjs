@@ -10,6 +10,7 @@ import {
 import { normalizeIdentifier } from "./security.mjs";
 
 const ITEM_NUMBER_PATTERN = /(?:-|\/)(\d{8})(?:\.html)?(?:$|[?#/])/;
+const BLOCK_PAGE_PATTERN = /captcha|access denied|verify (?:that )?you are human|unusual traffic|robot check|temporarily blocked|sorry,? you have been blocked|you have been blocked/i;
 
 export function currysItemNumber(url) {
   if (!url) return null;
@@ -17,47 +18,77 @@ export function currysItemNumber(url) {
   return pathname.match(/-(\d{8})\.html$/)?.[1] ?? pathname.match(ITEM_NUMBER_PATTERN)?.[1] ?? null;
 }
 
+export function isCurrysBlockPage(...values) {
+  return BLOCK_PAGE_PATTERN.test(values.filter(Boolean).join("\n"));
+}
+
 function firstMatch(text, patterns) {
   for (const pattern of patterns) {
-    const match = text.match(pattern);
+    const match = String(text ?? "").match(pattern);
     if (match?.[1]) return cleanText(match[1]);
   }
   return null;
 }
 
+function titleIdentityDetails(title) {
+  const titleText = String(title ?? "");
+  const cpu = firstMatch(titleText, [
+    /\b((?:Intel®?\s+)?Core(?:™)?\s+Ultra\s+[A-Z]?\d(?:\s+\d{3,4}[A-Z]*)?)\b/i,
+    /\b((?:Intel®?\s+)?Core(?:™)?\s+\d(?:\s+\d{3,4}[A-Z]*)?)\b/i,
+    /\b(AMD\s+Ryzen(?:™)?\s+(?:AI\s+)?\d(?:\s+\d{3,4}[A-Z]*)?)\b/i,
+    /\b(Snapdragon\s+X(?:2)?(?:\s+(?:Elite|Plus))?(?:\s+[A-Z0-9-]+)?)\b/i,
+  ]);
+  const storage = firstMatch(titleText, [/\b((?:\d+(?:\.\d+)?)\s*(?:TB|GB)\s*(?:SSD|UFS))\b/i]);
+  const screenSize = firstMatch(titleText, [/\b(\d{2}(?:\.\d)?["”])\s*(?:Laptop|Gaming Laptop|2 in 1)?/i]);
+  const colour = firstMatch(titleText, [/[-,]\s*([A-Za-z][A-Za-z ]{2,30})$/]);
+  const evidence = [
+    cpu ? "title-cpu" : null,
+    storage ? "title-storage" : null,
+    screenSize ? "title-screen-size" : null,
+    colour ? "title-colour" : null,
+  ].filter(Boolean);
+  return { cpu, storage, screenSize, colour, evidence };
+}
+
 export function extractCurrysSpecs(title, bodyText, structured = {}) {
-  const text = `${title ?? ""}\n${bodyText ?? ""}`;
+  const titleText = String(title ?? "");
+  const body = String(bodyText ?? "");
+  const text = `${titleText}\n${body}`;
+  const titleIdentity = titleIdentityDetails(titleText);
   const mpn = structured.identifiers?.mpn
     ?? findIdentifier(text, ["Manufacturer's Part Number", "Manufacturer SKU", "MPN", "Box contents"]);
   const ean = structured.identifiers?.ean
     ?? findIdentifier(text, ["EAN", "GTIN", "Barcode"], /\d{8,14}/);
   const sku = structured.identifiers?.sku ?? null;
 
-  const ram = labelledValue(text, ["RAM"])
-    ?? firstMatch(text, [/RAM:\s*([^/\n]{2,50})/i, /\b(\d{1,3}\s*GB\s*(?:LPDDR\w*|DDR\w*)?)\b/i]);
-  const storage = labelledValue(text, ["Storage"])
-    ?? firstMatch(text, [/Storage:\s*([^\n]{2,60})/i, /\b((?:\d+(?:\.\d+)?)\s*(?:TB|GB)\s*SSD)\b/i]);
-  const cpu = labelledValue(text, ["Processor"])
-    ?? firstMatch(text, [
+  const ram = labelledValue(body, ["RAM"])
+    ?? firstMatch(body, [/RAM:\s*([^/\n]{2,50})/i, /\b(\d{1,3}\s*GB\s*(?:LPDDR\w*|DDR\w*)?)\b/i]);
+  const storage = titleIdentity.storage
+    ?? labelledValue(body, ["Storage"])
+    ?? firstMatch(body, [/Storage:\s*([^\n]{2,60})/i, /\b((?:\d+(?:\.\d+)?)\s*(?:TB|GB)\s*(?:SSD|UFS))\b/i]);
+  const cpu = titleIdentity.cpu
+    ?? labelledValue(body, ["Processor"])
+    ?? firstMatch(body, [
       /\b((?:Intel®?\s+)?Core(?:™)?\s+Ultra\s+[A-Za-z0-9 -]{1,40}?)(?:\s+processor|\n|,)/i,
       /\b(AMD\s+Ryzen(?:™)?\s+[A-Za-z0-9 -]{1,40}?)(?:\s+processor|\n|,)/i,
       /\b(Snapdragon\s+X\s+[A-Za-z0-9 -]{1,40}?)(?:\s+processor|\n|,)/i,
     ]);
-  const gpu = labelledValue(text, ["Graphics", "GPU"])
-    ?? firstMatch(text, [/(NVIDIA\s+GeForce\s+RTX\s+\d{4}(?:\s+Ti)?[^\n,]*)/i, /(AMD\s+Radeon[^\n,]*)/i, /(Intel\s+Arc[^\n,]*)/i]);
-  const screenSize = labelledValue(text, ["Screen size"])
-    ?? firstMatch(title ?? "", [/\b(\d{2}(?:\.\d)?["”]\s*(?:Laptop|Gaming Laptop|2 in 1)?)\b/i]);
-  const screenType = labelledValue(text, ["Screen type"])
-    ?? firstMatch(text, [/\b(OLED|Mini LED|IPS|TN)\b/i]);
-  const resolution = labelledValue(text, ["Resolution"])
-    ?? firstMatch(text, [/\b((?:Full HD\+?|Quad HD\+?|2\.8K|3K|4K)(?:\s+\d{3,4}\s*x\s*\d{3,4}p?)?)\b/i]);
-  const refreshRate = firstMatch(text, [/\b(\d{2,3}\s*Hz)\b/i]);
-  const colour = labelledValue(text, ["Colour"])
-    ?? firstMatch(title ?? "", [/[-,]\s*([A-Za-z][A-Za-z ]{2,30})$/]);
+  const gpu = labelledValue(body, ["Graphics", "GPU"])
+    ?? firstMatch(body, [/(NVIDIA\s+GeForce\s+RTX\s+\d{4}(?:\s+Ti)?[^\n,]*)/i, /(AMD\s+Radeon[^\n,]*)/i, /(Intel\s+Arc[^\n,]*)/i]);
+  const screenSize = titleIdentity.screenSize
+    ?? labelledValue(body, ["Screen size"])
+    ?? firstMatch(body, [/\b(\d{2}(?:\.\d)?["”])\b/i]);
+  const screenType = labelledValue(body, ["Screen type"])
+    ?? firstMatch(body, [/\b(OLED|Mini LED|IPS|TN)\b/i]);
+  const resolution = labelledValue(body, ["Resolution"])
+    ?? firstMatch(body, [/\b((?:Full HD\+?|Quad HD\+?|2\.8K|3K|4K)(?:\s+\d{3,4}\s*x\s*\d{3,4}p?)?)\b/i]);
+  const refreshRate = firstMatch(body, [/\b(\d{2,3}\s*Hz)\b/i]);
+  const colour = titleIdentity.colour
+    ?? labelledValue(body, ["Colour"]);
 
   const manufacturer = structured.manufacturer
-    ?? firstMatch(title ?? "", [/^([A-Z][A-Z0-9]+)/]);
-  const modelFamily = cleanText((title ?? structured.productName ?? "").replace(/^([A-Z][A-Z0-9]+)\s+/i, "").split(" - ")[0]);
+    ?? firstMatch(titleText, [/^([A-Z][A-Z0-9]+)/]);
+  const modelFamily = cleanText((titleText || structured.productName || "").replace(/^([A-Z][A-Z0-9]+)\s+/i, "").split(" - ")[0]);
 
   return {
     manufacturer,
@@ -71,6 +102,7 @@ export function extractCurrysSpecs(title, bodyText, structured = {}) {
     storage,
     display: cleanText([screenSize, screenType, resolution, refreshRate].filter(Boolean).join(" / ")),
     colour,
+    _identityEvidence: titleIdentity.evidence,
   };
 }
 
@@ -107,7 +139,8 @@ export function evaluateCurrysAttempt(raw, expected = {}) {
   const canonicalItem = currysItemNumber(canonicalUrl);
   const itemNumber = canonicalItem ?? finalItem ?? requestedItem;
   const mainPrice = extractCurrysMainPrice(raw.mainText, raw.priceElementTexts);
-  const specs = extractCurrysSpecs(title, raw.bodyText, structured);
+  const extractedSpecs = extractCurrysSpecs(title, raw.bodyText, structured);
+  const { _identityEvidence: titleIdentityEvidence, ...specs } = extractedSpecs;
   const delivery = extractCurrysDelivery(raw.mainText, mainPrice?.value ?? null);
   const effectivePrice = mainPrice && delivery.charge !== null ? mainPrice.value + delivery.charge : mainPrice?.value ?? null;
   const inStock = deriveInStock(structured.availability, raw.mainText);
@@ -137,27 +170,27 @@ export function evaluateCurrysAttempt(raw, expected = {}) {
     conflicts.push(`expected price £${Number(expected.price).toFixed(2)}, found £${mainPrice.value.toFixed(2)}`);
   }
 
-  const blockText = `${raw.documentTitle ?? ""}\n${raw.bodyText?.slice(0, 12000) ?? ""}`;
-  const blocked = [403, 429].includes(raw.httpStatus) || /captcha|access denied|verify (?:that )?you are human|unusual traffic|robot check|temporarily blocked/i.test(blockText);
+  const blocked = [403, 429].includes(raw.httpStatus) || isCurrysBlockPage(raw.documentTitle, raw.heading, raw.bodyText?.slice(0, 12000), raw.mainText?.slice(0, 12000));
+  if (blocked) conflicts.push("retailer block page detected; product evidence quarantined");
   let status = "success";
   if (blocked) status = "blocked";
   else if (conflicts.length) status = "conflict";
   else if (!mainPrice || !title || !itemNumber) status = "failed";
 
-  const configurationEvidence = [specs.cpu, specs.ram, specs.storage, specs.display, specs.colour].filter(Boolean);
   const itemNumberConfirmed = expected.itemNumber
     ? itemNumber === String(expected.itemNumber)
     : Boolean(itemNumber && requestedItem === itemNumber && (!canonicalItem || canonicalItem === itemNumber));
   const canonicalConfirmed = Boolean(canonicalItem && canonicalItem === itemNumber);
   const strongIdentity = Boolean(
-    itemNumberConfirmed
+    !blocked
+      && itemNumberConfirmed
       && canonicalConfirmed
       && title
-      && ((specs.manufacturerSku || specs.ean) || configurationEvidence.length >= 2),
+      && ((specs.manufacturerSku || specs.ean) || titleIdentityEvidence.length >= 2),
   );
   if (status === "success" && !strongIdentity) {
     status = "conflict";
-    conflicts.push("identity is insufficient: confirm the retailer item, canonical product URL and at least two configuration details or an MPN/EAN");
+    conflicts.push("identity is insufficient: confirm the retailer item, canonical product URL and at least two title-derived configuration details or an MPN/EAN");
   }
   const identityBasis = [
     itemNumberConfirmed ? "retailer-item-number" : null,
@@ -165,11 +198,7 @@ export function evaluateCurrysAttempt(raw, expected = {}) {
     title ? "product-title" : null,
     specs.manufacturerSku ? "manufacturer-sku" : null,
     specs.ean ? "ean" : null,
-    specs.cpu ? "cpu" : null,
-    specs.ram ? "ram" : null,
-    specs.storage ? "storage" : null,
-    specs.display ? "display" : null,
-    specs.colour ? "colour" : null,
+    ...titleIdentityEvidence,
   ].filter(Boolean);
 
   return {
@@ -211,6 +240,7 @@ export function evaluateCurrysAttempt(raw, expected = {}) {
       delivery: delivery.method,
       canonical: raw.canonicalUrl ? "link[rel=canonical]" : "final-url-fallback",
       jsonLdParseErrorCount: structured.parseErrors.length,
+      specificationScope: "title-derived configuration used for identity; broad body specifications are informational only",
     },
     _debug: raw._debug ?? null,
   };
@@ -219,12 +249,9 @@ export function evaluateCurrysAttempt(raw, expected = {}) {
 export function identityFingerprint(attempt) {
   return [
     attempt.retailerItemNumber,
+    normalizeIdentifier(attempt.productTitle),
     normalizeIdentifier(attempt.manufacturerSku),
     normalizeIdentifier(attempt.ean),
-    normalizeIdentifier(attempt.cpu),
-    normalizeIdentifier(attempt.ram),
-    normalizeIdentifier(attempt.storage),
-    normalizeIdentifier(attempt.display),
-    normalizeIdentifier(attempt.colour),
+    normalizeIdentifier(attempt.canonicalUrl),
   ].join("|");
 }
