@@ -122,10 +122,17 @@ export function evaluateCurrysAttempt(raw, expected = {}) {
   if (expected.itemNumber && itemNumber !== String(expected.itemNumber)) {
     conflicts.push(`expected Currys item ${expected.itemNumber}, found ${itemNumber ?? "unknown"}`);
   }
-  const mpnMatch = identityMatches(expected.mpn, [specs.manufacturerSku, structured.identifiers.mpn], raw.bodyText);
-  const eanMatch = identityMatches(expected.ean, [specs.ean, structured.identifiers.ean], raw.bodyText);
-  if (mpnMatch === false) conflicts.push(`expected MPN ${expected.mpn} was not found`);
-  if (eanMatch === false) conflicts.push(`expected EAN ${expected.ean} was not found`);
+  const bodyIdentity = normalizeIdentifier(raw.bodyText);
+  const mpnValues = [specs.manufacturerSku, structured.identifiers.mpn].filter(Boolean);
+  const eanValues = [specs.ean, structured.identifiers.ean].filter(Boolean);
+  const mpnInBody = expected.mpn ? bodyIdentity.includes(normalizeIdentifier(expected.mpn)) : false;
+  const eanInBody = expected.ean ? bodyIdentity.includes(normalizeIdentifier(expected.ean)) : false;
+  const mpnPublished = mpnInBody || mpnValues.length > 0;
+  const eanPublished = eanInBody || eanValues.length > 0;
+  const mpnMatch = !expected.mpn ? null : mpnInBody ? true : mpnValues.length ? identityMatches(expected.mpn, mpnValues) : null;
+  const eanMatch = !expected.ean ? null : eanInBody ? true : eanValues.length ? identityMatches(expected.ean, eanValues) : null;
+  if (mpnMatch === false) conflicts.push(`published MPN disagrees with expected ${expected.mpn}`);
+  if (eanMatch === false) conflicts.push(`published EAN disagrees with expected ${expected.ean}`);
   if (expected.price !== null && expected.price !== undefined && mainPrice && Math.abs(mainPrice.value - Number(expected.price)) > 0.009) {
     conflicts.push(`expected price £${Number(expected.price).toFixed(2)}, found £${mainPrice.value.toFixed(2)}`);
   }
@@ -137,11 +144,33 @@ export function evaluateCurrysAttempt(raw, expected = {}) {
   else if (conflicts.length) status = "conflict";
   else if (!mainPrice || !title || !itemNumber) status = "failed";
 
-  const strongIdentity = Boolean(itemNumber && (specs.manufacturerSku || specs.ean));
+  const configurationEvidence = [specs.cpu, specs.ram, specs.storage, specs.display, specs.colour].filter(Boolean);
+  const itemNumberConfirmed = expected.itemNumber
+    ? itemNumber === String(expected.itemNumber)
+    : Boolean(itemNumber && requestedItem === itemNumber && (!canonicalItem || canonicalItem === itemNumber));
+  const canonicalConfirmed = Boolean(canonicalItem && canonicalItem === itemNumber);
+  const strongIdentity = Boolean(
+    itemNumberConfirmed
+      && canonicalConfirmed
+      && title
+      && ((specs.manufacturerSku || specs.ean) || configurationEvidence.length >= 2),
+  );
   if (status === "success" && !strongIdentity) {
     status = "conflict";
-    conflicts.push("identity is insufficient: retailer item number plus MPN or EAN is required");
+    conflicts.push("identity is insufficient: confirm the retailer item, canonical product URL and at least two configuration details or an MPN/EAN");
   }
+  const identityBasis = [
+    itemNumberConfirmed ? "retailer-item-number" : null,
+    canonicalConfirmed ? "canonical-item-number" : null,
+    title ? "product-title" : null,
+    specs.manufacturerSku ? "manufacturer-sku" : null,
+    specs.ean ? "ean" : null,
+    specs.cpu ? "cpu" : null,
+    specs.ram ? "ram" : null,
+    specs.storage ? "storage" : null,
+    specs.display ? "display" : null,
+    specs.colour ? "colour" : null,
+  ].filter(Boolean);
 
   return {
     status,
@@ -166,9 +195,13 @@ export function evaluateCurrysAttempt(raw, expected = {}) {
       expectedItemNumber: expected.itemNumber ?? null,
       itemNumberMatch: expected.itemNumber ? itemNumber === String(expected.itemNumber) : null,
       expectedMpn: expected.mpn ?? null,
+      mpnPublished,
       mpnMatch,
       expectedEan: expected.ean ?? null,
+      eanPublished,
       eanMatch,
+      strongIdentity,
+      identityBasis,
     },
     conflicts,
     evidenceUrls: [...new Set([raw.requestedUrl, raw.finalUrl, canonicalUrl].filter(Boolean))],

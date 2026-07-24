@@ -59,3 +59,62 @@ test("marks visible and structured price disagreement as a conflict", () => {
   assert.equal(result.status, "conflict");
   assert.match(result.conflicts.join(" "), /disagrees/);
 });
+
+test("treats unpublished expected identifiers as unknown when configuration identity is strong", () => {
+  const productJsonLd = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: "ACER Swift 16 AI 16-inch Laptop - Intel Core Ultra X7, 1 TB SSD, Grey",
+    offers: { "@type": "Offer", price: "1799.00", priceCurrency: "GBP", availability: "https://schema.org/InStock" },
+  });
+  const pageText = "ACER Swift 16 AI 16-inch Laptop - Intel Core Ultra X7, 1 TB SSD, Grey\nRAM: 32 GB LPDDR5X\n2.8K OLED screen\n£1,799.00\nAdd to basket";
+  const result = evaluateCurrysAttempt({
+    requestedUrl: "https://www.currys.co.uk/products/acer-swift-10296598.html",
+    finalUrl: "https://www.currys.co.uk/products/acer-swift-10296598.html",
+    canonicalUrl: "https://www.currys.co.uk/products/acer-swift-10296598.html",
+    httpStatus: 200,
+    documentTitle: "ACER Swift 16 AI | Currys",
+    heading: "ACER Swift 16 AI 16-inch Laptop - Intel Core Ultra X7, 1 TB SSD, Grey",
+    bodyText: pageText,
+    mainText: pageText,
+    jsonLdTexts: [productJsonLd],
+    priceElementTexts: ["£1,799.00"],
+    timestamp: "2026-07-24T00:00:00.000Z",
+  }, { itemNumber: "10296598", mpn: "NX.JU1EK.001", ean: "4711474906946", price: 1799 });
+
+  assert.equal(result.status, "success");
+  assert.equal(result.identityChecks.mpnPublished, false);
+  assert.equal(result.identityChecks.mpnMatch, null);
+  assert.equal(result.identityChecks.eanPublished, false);
+  assert.equal(result.identityChecks.eanMatch, null);
+  assert.equal(result.identityChecks.strongIdentity, true);
+});
+
+test("blocks a published mismatching MPN", () => {
+  const wrongJsonLd = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: "ACER Swift 16 AI 16-inch Laptop - Intel Core Ultra X7, 1 TB SSD, Grey",
+    mpn: "WRONG.001",
+    offers: { "@type": "Offer", price: "1799.00", priceCurrency: "GBP" },
+  });
+  const pageText = "ACER Swift 16 AI 16-inch Laptop - Intel Core Ultra X7, 1 TB SSD, Grey\nRAM: 32 GB LPDDR5X\n£1,799.00";
+  const result = evaluateCurrysAttempt({
+    requestedUrl: "https://www.currys.co.uk/products/acer-swift-10296598.html",
+    finalUrl: "https://www.currys.co.uk/products/acer-swift-10296598.html",
+    canonicalUrl: "https://www.currys.co.uk/products/acer-swift-10296598.html",
+    httpStatus: 200,
+    documentTitle: "ACER Swift 16 AI | Currys",
+    heading: "ACER Swift 16 AI 16-inch Laptop - Intel Core Ultra X7, 1 TB SSD, Grey",
+    bodyText: pageText,
+    mainText: pageText,
+    jsonLdTexts: [wrongJsonLd],
+    priceElementTexts: ["£1,799.00"],
+    timestamp: "2026-07-24T00:00:00.000Z",
+  }, { itemNumber: "10296598", mpn: "NX.JU1EK.001", price: 1799 });
+
+  assert.equal(result.status, "conflict");
+  assert.equal(result.identityChecks.mpnPublished, true);
+  assert.equal(result.identityChecks.mpnMatch, false);
+  assert.match(result.conflicts.join(" "), /published MPN disagrees/);
+});
