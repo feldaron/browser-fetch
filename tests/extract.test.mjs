@@ -118,3 +118,59 @@ test("blocks a published mismatching MPN", () => {
   assert.equal(result.identityChecks.mpnMatch, false);
   assert.match(result.conflicts.join(" "), /published MPN disagrees/);
 });
+
+test("quarantines a Currys block page even when structured and visible prices match", () => {
+  const blockedJsonLd = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: "SAMSUNG Galaxy Book6 14-inch Laptop - Intel Core Ultra 7, 512 GB SSD, Grey",
+    offers: { "@type": "Offer", price: "1149.00", priceCurrency: "GBP", availability: "https://schema.org/InStock" },
+  });
+  const result = evaluateCurrysAttempt({
+    requestedUrl: "https://www.currys.co.uk/products/samsung-example-10299351.html",
+    finalUrl: "https://www.currys.co.uk/products/samsung-example-10299351.html",
+    canonicalUrl: "https://www.currys.co.uk/products/samsung-example-10299351.html",
+    httpStatus: 200,
+    documentTitle: "Sorry, you have been blocked",
+    heading: "Sorry, you have been blocked",
+    bodyText: "Sorry, you have been blocked. Intel Core Ultra 7. 512 GB SSD. £1,149.00",
+    mainText: "Sorry, you have been blocked. £1,149.00",
+    jsonLdTexts: [blockedJsonLd],
+    priceElementTexts: ["£1,149.00"],
+    timestamp: "2026-07-24T00:00:00.000Z",
+  }, { itemNumber: "10299351" });
+
+  assert.equal(result.status, "blocked");
+  assert.equal(result.identityChecks.strongIdentity, false);
+  assert.match(result.conflicts.join(" "), /block page detected/);
+});
+
+test("uses CPU and storage from the product title before unrelated recommendation specs", () => {
+  const productJsonLd = JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: "ASUS Vivobook S16 16-inch Laptop - Snapdragon X2 Elite, 1 TB SSD, Mist Blue",
+    offers: { "@type": "Offer", price: "1199.00", priceCurrency: "GBP", availability: "https://schema.org/InStock" },
+  });
+  const title = "ASUS Vivobook S16 16\" Laptop, Copilot+ PC - Snapdragon X2 Elite, 1 TB SSD, Mist Blue";
+  const body = `${title}\nRecommended product\nProcessor: Intel Core Ultra X7\nRAM: 16 GB / Storage: 512 GB SSD\n£1,199.00`;
+  const result = evaluateCurrysAttempt({
+    requestedUrl: "https://www.currys.co.uk/products/asus-example-10301041.html",
+    finalUrl: "https://www.currys.co.uk/products/asus-example-10301041.html",
+    canonicalUrl: "https://www.currys.co.uk/products/asus-example-10301041.html",
+    httpStatus: 200,
+    documentTitle: title,
+    heading: title,
+    bodyText: body,
+    mainText: body,
+    jsonLdTexts: [productJsonLd],
+    priceElementTexts: ["£1,199.00"],
+    timestamp: "2026-07-24T00:00:00.000Z",
+  }, { itemNumber: "10301041" });
+
+  assert.equal(result.status, "success");
+  assert.match(result.cpu, /Snapdragon X2 Elite/i);
+  assert.equal(result.storage, "1 TB SSD");
+  assert.ok(result.identityChecks.identityBasis.includes("title-cpu"));
+  assert.ok(result.identityChecks.identityBasis.includes("title-storage"));
+});
