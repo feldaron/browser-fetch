@@ -1,9 +1,0 @@
-[
-  {
-    "id": "example-laptop",
-    "retailer": "Currys",
-    "url": "https://www.currys.co.uk/example-product-page",
-    "expectedSku": "EXAMPLE-SKU",
-    "expectedEan": "1234567890123"
-  }
-]
