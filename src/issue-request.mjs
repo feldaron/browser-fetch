@@ -52,6 +52,8 @@ function catalogueSummary(result) {
     `**Mode:** \`${result.mode}\``,
     `**Catalogue pages completed:** ${result.pages.length}`,
     `**Products discovered:** ${result.pages.reduce((sum, page) => sum + (page.productUrls?.length ?? 0), 0)}`,
+    `**Raw unique product links seen:** ${result.pages.reduce((sum, page) => sum + (page.rawUniqueProductLinkCount ?? page.productUrls?.length ?? 0), 0)}`,
+    `**Discovery was page-size capped:** ${result.pages.some((page) => page.productLinksCappedToPageSize) ? "yes" : "no"}`,
     `**Products verified:** ${result.pages.reduce((sum, page) => sum + (page.completedProductCount ?? 0), 0)}`,
     `**Product statuses:** \`${JSON.stringify(counts)}\``,
     `**Compact checkpoint evidence:**\n\n\`\`\`json\n${JSON.stringify(result.pages, null, 2).slice(0, 50000)}\n\`\`\``,
@@ -66,10 +68,21 @@ async function main() {
   if (!issue.title.startsWith("[browser-fetch]")) throw new Error("Issue title must begin with [browser-fetch]");
   if (!issue.body) throw new Error("Issue body must contain a JSON request");
 
+  const base = `https://api.github.com/repos/${event.repository.full_name}/issues/${issue.number}`;
+  const runUrl = `${process.env.GITHUB_SERVER_URL ?? "https://github.com"}/${event.repository.full_name}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+  const runLabel = process.env.GITHUB_RUN_ID ?? "unknown";
   let result;
   let error = null;
+
   try {
-    result = await runFromConfig(configFromEnvironment({ ...process.env, ...issueBodyToEnvironment(issue.body) }));
+    const config = configFromEnvironment({ ...process.env, ...issueBodyToEnvironment(issue.body) });
+    await githubRequest(`${base}/comments`, {
+      method: "POST",
+      body: JSON.stringify({
+        body: `**Browser fetch started.**\n\n**Workflow run:** [\`${runLabel}\`](${runUrl})\n\n**Mode:** \`${config.mode}\`\n\nThe run is bounded by the requested catalogue page size and writes checkpoints after discovery and each product.`,
+      }),
+    }).catch(() => undefined);
+    result = await runFromConfig(config);
   } catch (caught) {
     error = caught instanceof Error ? caught.message : String(caught);
   }
@@ -77,6 +90,7 @@ async function main() {
   const lines = result
     ? [
         `**Browser fetch status:** \`${result.status}\``,
+        `**Workflow run:** [\`${runLabel}\`](${runUrl})`,
         result.retailerItemNumber ? `**Currys item:** \`${result.retailerItemNumber}\`` : null,
         result.productTitle ? `**Product:** ${result.productTitle}` : null,
         result.mainPurchasePrice !== undefined
@@ -108,9 +122,12 @@ async function main() {
           : null,
         "The complete compact JSON evidence is attached to the workflow run artifact.",
       ].filter(Boolean)
-    : ["**Browser fetch failed before producing evidence.**", `- ${error}`];
+    : [
+        "**Browser fetch failed before producing evidence.**",
+        `**Workflow run:** [\`${runLabel}\`](${runUrl})`,
+        `- ${error}`,
+      ];
 
-  const base = `https://api.github.com/repos/${event.repository.full_name}/issues/${issue.number}`;
   await githubRequest(`${base}/comments`, { method: "POST", body: JSON.stringify({ body: lines.join("\n\n") }) });
   await githubRequest(base, { method: "PATCH", body: JSON.stringify({ state: "closed" }) });
   if (error || result.status !== "success") process.exitCode = 1;
