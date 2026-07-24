@@ -5,12 +5,19 @@ on:
     branches: [main]
     paths:
       - .github/workflows/run-bootstrap.yml
+  issues:
+    types: [opened]
 
 permissions:
   contents: write
 
 jobs:
   bootstrap:
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'issues' &&
+       github.event.issue.user.login == github.repository_owner &&
+       github.event.issue.title == '[bootstrap-run]')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
