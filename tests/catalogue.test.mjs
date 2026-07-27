@@ -31,14 +31,14 @@ test("maps Currys Business page 2 to one-based start=49 for 48 products", () => 
 
 test("accepts only literal Currys Business Windows-laptop card links", () => {
   const hrefs = [
-    "/catalogue/computing/laptops/windows-laptop/asus-vivobook-14/N596932W",
-    "/catalogue/computing/laptops/windows-laptop/asus-vivobook-14/N596932W",
+    "/catalogue/computing/laptops/windows-laptop/asus-vivobook-14/N596932W?from=category&heat=img",
+    "/catalogue/computing/laptops/windows-laptop/asus-vivobook-14/N596932W?from=category&heat=title",
     "/catalogue/computing/laptops/chromebook/example/N111111W",
     "https://example.com/catalogue/computing/laptops/windows-laptop/example/N222222W",
   ];
   const selection = selectCurrysProductUrls(hrefs, "https://business.currys.co.uk/catalogue/computing/laptops/windows-laptop", 48);
   assert.deepEqual(selection.productUrls, [
-    "https://business.currys.co.uk/catalogue/computing/laptops/windows-laptop/asus-vivobook-14/N596932W",
+    "https://business.currys.co.uk/catalogue/computing/laptops/windows-laptop/asus-vivobook-14/N596932W?from=category&heat=img",
   ]);
   assert.equal(selection.candidateCount, 1);
 });

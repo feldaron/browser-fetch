@@ -33,8 +33,9 @@ export function selectCurrysProductUrls(hrefs, baseUrl, pageSize = 20) {
     const parsed = new URL(url);
     const consumerProduct = /\/products\/[^?#]+-\d{8}\.html$/.test(parsed.pathname);
     const businessProduct = /\/catalogue\/computing\/laptops\/windows-laptop\/[^?#]+\/[A-Z]\d{6}[A-Z]$/i.test(parsed.pathname);
-    if ((!consumerProduct && !businessProduct) || seen.has(url)) continue;
-    seen.add(url);
+    const identityKey = businessProduct ? parsed.pathname.toLowerCase() : url;
+    if ((!consumerProduct && !businessProduct) || seen.has(identityKey)) continue;
+    seen.add(identityKey);
     candidates.push(url);
   }
 

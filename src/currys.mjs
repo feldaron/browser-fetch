@@ -149,18 +149,24 @@ export function extractCurrysDelivery(mainText, price) {
 export function evaluateCurrysAttempt(raw, expected = {}) {
   const structured = parseJsonLdTexts(raw.jsonLdTexts ?? []);
   const business = new URL(raw.requestedUrl).hostname.toLowerCase() === "business.currys.co.uk";
-  const title = cleanText(raw.heading) ?? cleanText(structured.productName) ?? cleanText(raw.documentTitle);
+  let title = cleanText(raw.heading) ?? cleanText(structured.productName) ?? cleanText(raw.documentTitle);
+  if (business && title) {
+    title = cleanText(title
+      .replace(/\s*-\s*Currys Business\s*$/i, "")
+      .replace(/\s*-\s*[A-Z0-9#._-]{5,}\s*$/i, ""));
+  }
   const canonicalUrl = raw.canonicalUrl ?? raw.finalUrl;
   const requestedItem = currysItemNumber(raw.requestedUrl);
   const finalItem = currysItemNumber(raw.finalUrl);
   const canonicalItem = currysItemNumber(canonicalUrl);
   const itemNumber = canonicalItem ?? finalItem ?? requestedItem;
-  const mainPrice = extractCurrysMainPrice(raw.mainText, raw.priceElementTexts);
+  const purchaseText = business ? [raw.mainText, raw.bodyText].filter(Boolean).join("\n") : raw.mainText;
+  const mainPrice = extractCurrysMainPrice(purchaseText, raw.priceElementTexts);
   const extractedSpecs = extractCurrysSpecs(title, raw.bodyText, structured);
   const { _identityEvidence: titleIdentityEvidence, ...specs } = extractedSpecs;
-  const delivery = extractCurrysDelivery(raw.mainText, mainPrice?.value ?? null);
+  const delivery = extractCurrysDelivery(purchaseText, mainPrice?.value ?? null);
   const effectivePrice = mainPrice && delivery.charge !== null ? mainPrice.value + delivery.charge : mainPrice?.value ?? null;
-  const inStock = deriveInStock(structured.availability, raw.mainText);
+  const inStock = deriveInStock(structured.availability, purchaseText);
   const conflicts = [];
 
   if (mainPrice && structured.structuredPrice !== null) {

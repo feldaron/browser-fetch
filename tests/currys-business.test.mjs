@@ -61,6 +61,27 @@ test("verifies Currys Business identity and retains the inc-VAT price", () => {
   assert.equal(result.provenance.priceBasis, "published-inc-vat");
 });
 
+test("finds the VAT-inclusive price when the product page has no main element", () => {
+  const result = evaluateCurrysAttempt({
+    requestedUrl: productUrl,
+    finalUrl: productUrl,
+    canonicalUrl: productUrl,
+    httpStatus: 200,
+    documentTitle: `${title} - X1404VA-EB1154W - Currys Business`,
+    heading: null,
+    bodyText: mainText,
+    mainText: "",
+    jsonLdTexts,
+    priceElementTexts: [],
+    timestamp: "2026-07-27T00:00:00.000Z",
+  }, { itemNumber: "N596932W", mpn: "X1404VA-EB1154W", ean: null, price: null });
+
+  assert.equal(result.status, "success");
+  assert.equal(result.mainPurchasePrice, 399);
+  assert.equal(result.productTitle, title);
+  assert.equal(result.colour, "Silver");
+});
+
 test("quarantines an inconsistent published VAT pair", () => {
   const inconsistent = mainText.replace("£399.00 inc VAT", "£400.00 inc VAT");
   const result = evaluateCurrysAttempt({
