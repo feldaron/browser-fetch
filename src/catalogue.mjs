@@ -7,8 +7,13 @@ export function currysCataloguePageUrl(baseUrl, pageNumber, pageSize = 20) {
   const url = validateRetailerUrl(baseUrl, "currys");
   if (!Number.isInteger(pageNumber) || pageNumber < 1) throw new Error("pageNumber must be at least 1");
   if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error("pageSize must be from 1 to 100");
-  url.searchParams.set("start", String((pageNumber - 1) * pageSize));
-  url.searchParams.set("sz", String(pageSize));
+  if (url.hostname.toLowerCase() === "business.currys.co.uk") {
+    url.searchParams.set("start", String(((pageNumber - 1) * pageSize) + 1));
+    url.searchParams.delete("sz");
+  } else {
+    url.searchParams.set("start", String((pageNumber - 1) * pageSize));
+    url.searchParams.set("sz", String(pageSize));
+  }
   return url.toString();
 }
 
@@ -25,7 +30,10 @@ export function selectCurrysProductUrls(hrefs, baseUrl, pageSize = 20) {
     } catch {
       continue;
     }
-    if (!/\/products\/[^?#]+-\d{8}\.html(?:$|[?#])/.test(url) || seen.has(url)) continue;
+    const parsed = new URL(url);
+    const consumerProduct = /\/products\/[^?#]+-\d{8}\.html$/.test(parsed.pathname);
+    const businessProduct = /\/catalogue\/computing\/laptops\/windows-laptop\/[^?#]+\/[A-Z]\d{6}[A-Z]$/i.test(parsed.pathname);
+    if ((!consumerProduct && !businessProduct) || seen.has(url)) continue;
     seen.add(url);
     candidates.push(url);
   }
@@ -54,9 +62,11 @@ export async function discoverCurrysPage(baseUrl, pageNumber, options = {}) {
       return { status: "blocked", pageNumber, requestedUrl: pageUrl, finalUrl: page.url(), httpStatus: response?.status() ?? null, productUrls: [], conflicts: ["catalogue page was blocked"] };
     }
 
-    let hrefs = await page.locator('main a[href*="/products/"]').evaluateAll((anchors) => anchors.map((anchor) => anchor.getAttribute("href"))).catch(() => []);
+    const business = new URL(page.url()).hostname.toLowerCase() === "business.currys.co.uk";
+    const productPath = business ? "/catalogue/computing/laptops/windows-laptop/" : "/products/";
+    let hrefs = await page.locator(`main a[href*="${productPath}"]`).evaluateAll((anchors) => anchors.map((anchor) => anchor.getAttribute("href"))).catch(() => []);
     if (hrefs.length === 0) {
-      hrefs = await page.locator('a[href*="/products/"]').evaluateAll((anchors) => anchors.map((anchor) => anchor.getAttribute("href"))).catch(() => []);
+      hrefs = await page.locator(`a[href*="${productPath}"]`).evaluateAll((anchors) => anchors.map((anchor) => anchor.getAttribute("href"))).catch(() => []);
     }
     const selection = selectCurrysProductUrls(hrefs, page.url(), pageSize);
     return {
