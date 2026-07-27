@@ -15,7 +15,10 @@ const BLOCK_PAGE_PATTERN = /captcha|access denied|verify (?:that )?you are human
 export function currysItemNumber(url) {
   if (!url) return null;
   const pathname = new URL(url).pathname;
-  return pathname.match(/-(\d{8})\.html$/)?.[1] ?? pathname.match(ITEM_NUMBER_PATTERN)?.[1] ?? null;
+  return pathname.match(/-(\d{8})\.html$/)?.[1]
+    ?? pathname.match(/\/([A-Z]\d{6}[A-Z])$/i)?.[1]?.toUpperCase()
+    ?? pathname.match(ITEM_NUMBER_PATTERN)?.[1]
+    ?? null;
 }
 
 export function isCurrysBlockPage(...values) {
@@ -55,7 +58,9 @@ export function extractCurrysSpecs(title, bodyText, structured = {}) {
   const body = String(bodyText ?? "");
   const text = `${titleText}\n${body}`;
   const titleIdentity = titleIdentityDetails(titleText);
+  const businessMpn = firstMatch(text, [/Product code:\s*[A-Z]\d{6}[A-Z]\s*\|\s*([A-Z0-9#._/-]+)/i]);
   const mpn = structured.identifiers?.mpn
+    ?? businessMpn
     ?? findIdentifier(text, ["Manufacturer's Part Number", "Manufacturer SKU", "MPN", "Box contents"]);
   const ean = structured.identifiers?.ean
     ?? findIdentifier(text, ["EAN", "GTIN", "Barcode"], /\d{8,14}/);
@@ -107,6 +112,17 @@ export function extractCurrysSpecs(title, bodyText, structured = {}) {
 }
 
 export function extractCurrysMainPrice(mainText, priceElementTexts = []) {
+  const combinedText = [mainText, ...priceElementTexts].filter(Boolean).join("\n");
+  const incVatMatch = combinedText.match(/£\s*([0-9]{1,6}(?:,[0-9]{3})*(?:\.\d{2})?)\s*inc\s+VAT/i);
+  if (incVatMatch) {
+    const value = Number.parseFloat(incVatMatch[1].replace(/,/g, ""));
+    const exVatMatch = combinedText.match(/£\s*([0-9]{1,6}(?:,[0-9]{3})*(?:\.\d{2})?)\s*ex\s+VAT/i);
+    const exVatValue = exVatMatch ? Number.parseFloat(exVatMatch[1].replace(/,/g, "")) : null;
+    if (Number.isFinite(value) && value >= 20) {
+      return { value, text: incVatMatch[0], method: "business-inc-vat", exVatValue };
+    }
+  }
+
   const elementPrice = extractStandalonePrice(priceElementTexts.flatMap((value) => String(value).split(/\r?\n/)));
   if (elementPrice) return { ...elementPrice, method: "main-purchase-price-element" };
 
@@ -132,6 +148,7 @@ export function extractCurrysDelivery(mainText, price) {
 
 export function evaluateCurrysAttempt(raw, expected = {}) {
   const structured = parseJsonLdTexts(raw.jsonLdTexts ?? []);
+  const business = new URL(raw.requestedUrl).hostname.toLowerCase() === "business.currys.co.uk";
   const title = cleanText(raw.heading) ?? cleanText(structured.productName) ?? cleanText(raw.documentTitle);
   const canonicalUrl = raw.canonicalUrl ?? raw.finalUrl;
   const requestedItem = currysItemNumber(raw.requestedUrl);
@@ -146,8 +163,20 @@ export function evaluateCurrysAttempt(raw, expected = {}) {
   const inStock = deriveInStock(structured.availability, raw.mainText);
   const conflicts = [];
 
-  if (mainPrice && structured.structuredPrice !== null && Math.abs(mainPrice.value - structured.structuredPrice) > 0.009) {
-    conflicts.push(`main price £${mainPrice.value.toFixed(2)} disagrees with structured price £${structured.structuredPrice.toFixed(2)}`);
+  if (mainPrice && structured.structuredPrice !== null) {
+    const structuredMatchesIncVat = Math.abs(mainPrice.value - structured.structuredPrice) <= 0.02;
+    const structuredMatchesExVat = business
+      && typeof mainPrice.exVatValue === "number"
+      && Math.abs(mainPrice.exVatValue - structured.structuredPrice) <= 0.02;
+    if (!structuredMatchesIncVat && !structuredMatchesExVat) {
+      conflicts.push(`VAT-inclusive main price £${mainPrice.value.toFixed(2)} disagrees with structured price £${structured.structuredPrice.toFixed(2)}`);
+    }
+  }
+  if (business && mainPrice && typeof mainPrice.exVatValue === "number") {
+    const calculatedIncVat = Math.round(mainPrice.exVatValue * 1.2 * 100) / 100;
+    if (Math.abs(calculatedIncVat - mainPrice.value) > 0.02) {
+      conflicts.push(`published inc-VAT price £${mainPrice.value.toFixed(2)} is not 20% above ex-VAT price £${mainPrice.exVatValue.toFixed(2)}`);
+    }
   }
   if (requestedItem && finalItem && requestedItem !== finalItem && finalItem !== canonicalItem) {
     conflicts.push(`redirect changed retailer item number from ${requestedItem} to ${finalItem}`);
@@ -212,6 +241,8 @@ export function evaluateCurrysAttempt(raw, expected = {}) {
     ...specs,
     mainPurchasePrice: mainPrice?.value ?? null,
     mainPurchasePriceText: mainPrice?.text ?? null,
+    exVatPrice: mainPrice?.exVatValue ?? null,
+    vatIncluded: business ? true : null,
     deliveryCharge: delivery.charge,
     effectivePrice,
     currency: structured.structuredCurrency === "GBP" || !structured.structuredCurrency ? "GBP" : structured.structuredCurrency,
@@ -219,7 +250,9 @@ export function evaluateCurrysAttempt(raw, expected = {}) {
     inStock,
     structuredOfferPrice: structured.structuredPrice,
     timestamp: raw.timestamp,
-    verificationMethod: "headed Google Chrome / isolated Playwright context / Currys main purchase block",
+    verificationMethod: business
+      ? "headed Google Chrome / isolated Playwright context / Currys Business VAT-inclusive purchase block"
+      : "headed Google Chrome / isolated Playwright context / Currys main purchase block",
     identityChecks: {
       expectedItemNumber: expected.itemNumber ?? null,
       itemNumberMatch: expected.itemNumber ? itemNumber === String(expected.itemNumber) : null,
@@ -236,6 +269,7 @@ export function evaluateCurrysAttempt(raw, expected = {}) {
     evidenceUrls: [...new Set([raw.requestedUrl, raw.finalUrl, canonicalUrl].filter(Boolean))],
     provenance: {
       mainPrice: mainPrice?.method ?? "not-found",
+      priceBasis: business ? "published-inc-vat" : "published-consumer-price",
       structuredPrice: structured.offerSource ?? "not-found",
       delivery: delivery.method,
       canonical: raw.canonicalUrl ? "link[rel=canonical]" : "final-url-fallback",
