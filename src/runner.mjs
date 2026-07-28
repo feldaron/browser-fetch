@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { aggregateAttempts } from "./aggregate.mjs";
-import { launchChrome, loadCurrysAttempt } from "./browser.mjs";
+import { launchChrome, loadRetailerAttempt } from "./browser.mjs";
 
 function safeName(value) {
   return String(value ?? "result").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 100) || "result";
@@ -30,7 +30,7 @@ export async function verifyProduct(target, options = {}) {
 
   try {
     for (let index = 0; index < repeatCount; index += 1) {
-      const attempt = await loadCurrysAttempt(browser, target, { captureDebug: Boolean(options.captureDebug) });
+      const attempt = await loadRetailerAttempt(browser, target, { captureDebug: Boolean(options.captureDebug), retailer: options.retailer ?? "currys" });
       attempts.push(attempt);
       if (attempt.status === "blocked") break;
       if (index + 1 < repeatCount) await new Promise((resolve) => setTimeout(resolve, Number(options.delayMs ?? 1200)));
@@ -38,7 +38,7 @@ export async function verifyProduct(target, options = {}) {
 
     let result = aggregateAttempts(attempts, target.expected);
     if (result.status !== "success" && !options.captureDebug && attempts.every((attempt) => !attempt._debug)) {
-      const diagnostic = await loadCurrysAttempt(browser, target, { captureDebug: true });
+      const diagnostic = await loadRetailerAttempt(browser, target, { captureDebug: true, retailer: options.retailer ?? "currys" });
       attempts.push(diagnostic);
       result = aggregateAttempts(attempts, target.expected);
     }

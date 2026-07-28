@@ -35,7 +35,7 @@ export function configFromEnvironment(env = process.env) {
     repeatCount: integer(env.REPEAT_COUNT, mode === "specific-product" ? 3 : 2, 1, 8),
     delayMs: integer(env.REQUEST_DELAY_MS, 1500, 0, 30000),
   };
-  if (config.retailer !== "currys") throw new Error("Only the Currys adapter is currently implemented");
+  if (!["currys", "argos"].includes(config.retailer)) throw new Error(`Unsupported retailer: ${config.retailer}`);
 
   if (mode === "specific-product") {
     if (!env.PRODUCT_URL) throw new Error("PRODUCT_URL is required in specific-product mode");
@@ -74,6 +74,7 @@ export async function runFromConfig(config) {
       outputDirectory: config.outputDirectory,
       delayMs: config.delayMs,
       captureDebug: config.captureDebug,
+      retailer: config.retailer,
     });
   } else {
     result = await runCatalogue(config);

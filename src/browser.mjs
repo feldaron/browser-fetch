@@ -1,5 +1,6 @@
 import { chromium } from "playwright";
 import { evaluateCurrysAttempt } from "./currys.mjs";
+import { evaluateArgosAttempt } from "./argos.mjs";
 import { validateRetailerUrl } from "./security.mjs";
 
 async function acceptConsent(page) {
@@ -44,8 +45,8 @@ export async function launchChrome({ headed = true } = {}) {
   });
 }
 
-export async function loadCurrysAttempt(browser, target, { captureDebug = false } = {}) {
-  const requested = validateRetailerUrl(target.url, "currys");
+export async function loadRetailerAttempt(browser, target, { captureDebug = false, retailer = "currys" } = {}) {
+  const requested = validateRetailerUrl(target.url, retailer);
   const context = await browser.newContext({
     locale: "en-GB",
     timezoneId: "Europe/London",
@@ -62,7 +63,7 @@ export async function loadCurrysAttempt(browser, target, { captureDebug = false 
     await page.waitForTimeout(2500);
 
     const finalUrl = page.url();
-    validateRetailerUrl(finalUrl, "currys");
+    validateRetailerUrl(finalUrl, retailer);
     const [documentTitle, heading, bodyText, mainText, canonicalUrl, jsonLdTexts, priceElementTexts] = await Promise.all([
       page.title().catch(() => null),
       page.locator("h1").first().innerText({ timeout: 5000 }).catch(() => null),
@@ -88,7 +89,7 @@ export async function loadCurrysAttempt(browser, target, { captureDebug = false 
       _debug: captureDebug ? { html: await page.content().catch(() => null) } : null,
     };
 
-    const attempt = evaluateCurrysAttempt(raw, target.expected);
+    const attempt = retailer === "argos" ? evaluateArgosAttempt(raw, target.expected) : evaluateCurrysAttempt(raw, target.expected);
     if (captureDebug || attempt.status !== "success") {
       const screenshot = await page.screenshot({ fullPage: true }).catch(() => null);
       attempt._debug = { ...(attempt._debug ?? {}), html: raw._debug?.html ?? await page.content().catch(() => null), screenshot };
@@ -135,3 +136,5 @@ export async function loadCurrysAttempt(browser, target, { captureDebug = false 
     await context.close();
   }
 }
+
+export const loadCurrysAttempt = loadRetailerAttempt;
