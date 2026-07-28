@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { currysItemNumber } from "./currys.mjs";
+import { argosItemNumber } from "./argos.mjs";
 import { validateRetailerUrl } from "./security.mjs";
 
 export function currysCataloguePageUrl(baseUrl, pageNumber, pageSize = 20) {
@@ -44,6 +45,48 @@ export function selectCurrysProductUrls(hrefs, baseUrl, pageSize = 20) {
     candidateCount: candidates.length,
     capped: candidates.length > pageSize,
   };
+}
+
+export function argosCataloguePageUrl(baseUrl, pageNumber) {
+  const url = validateRetailerUrl(baseUrl, "argos");
+  if (!Number.isInteger(pageNumber) || pageNumber < 1) throw new Error("pageNumber must be at least 1");
+  url.searchParams.set("page", String(pageNumber));
+  return url.toString();
+}
+
+export function selectArgosProductUrls(hrefs, baseUrl, pageSize = 48) {
+  const candidates = [];
+  const seen = new Set();
+  for (const href of hrefs ?? []) {
+    if (!href) continue;
+    let url;
+    try { url = validateRetailerUrl(new URL(href, baseUrl).toString(), "argos"); } catch { continue; }
+    const item = argosItemNumber(url.toString());
+    if (!item || seen.has(item)) continue;
+    seen.add(item);
+    url.search = "";
+    candidates.push(url.toString());
+  }
+  return { productUrls: candidates.slice(0, pageSize), candidateCount: candidates.length, capped: candidates.length > pageSize };
+}
+
+async function discoverArgosPage(baseUrl, pageNumber, options = {}) {
+  const pageSize = Number(options.pageSize ?? 48);
+  const pageUrl = argosCataloguePageUrl(baseUrl, pageNumber);
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch({ channel: process.env.BROWSER_CHANNEL ?? "chrome", headless: options.headed === false });
+  const context = await browser.newContext({ locale: "en-GB", timezoneId: "Europe/London", viewport: { width: 1440, height: 1100 } });
+  const page = await context.newPage();
+  try {
+    const response = await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    await page.waitForLoadState("load", { timeout: 15_000 }).catch(() => undefined);
+    await page.waitForTimeout(3000);
+    const bodyText = await page.locator("body").innerText().catch(() => "");
+    if ([403,429].includes(response?.status()) || /captcha|access denied|verify (?:that )?you are human|robot check/i.test(bodyText.slice(0,12000))) return { status:"blocked", pageNumber, requestedUrl:pageUrl, finalUrl:page.url(), httpStatus:response?.status() ?? null, productUrls:[], conflicts:["catalogue page was blocked"] };
+    const hrefs = await page.locator('a[href*="/product/"]').evaluateAll((anchors) => anchors.map((a) => a.getAttribute("href"))).catch(() => []);
+    const selection = selectArgosProductUrls(hrefs, page.url(), pageSize);
+    return { status:selection.productUrls.length ? "success" : "failed", pageNumber, requestedUrl:pageUrl, finalUrl:page.url(), httpStatus:response?.status() ?? null, productUrls:selection.productUrls, retailerItemNumbers:selection.productUrls.map(argosItemNumber), rawUniqueProductLinkCount:selection.candidateCount, productLinksCappedToPageSize:selection.capped, discoveredAt:new Date().toISOString(), verificationMethod:`literal Argos product-card href discovery capped to requested page size ${pageSize}; catalogue-card prices ignored`, conflicts:selection.productUrls.length ? [] : ["no Argos product-card hrefs were found"] };
+  } finally { await context.close(); await browser.close(); }
 }
 
 export async function discoverCurrysPage(baseUrl, pageNumber, options = {}) {
@@ -104,7 +147,9 @@ export async function runCatalogue(config) {
   let overallStatus = "success";
 
   for (let pageNumber = config.startPage; pageNumber <= config.endPage; pageNumber += 1) {
-    const discovery = await discoverCurrysPage(config.catalogueUrl, pageNumber, { pageSize: config.pageSize, headed: config.headed });
+    const discovery = config.retailer === "argos"
+      ? await discoverArgosPage(config.catalogueUrl, pageNumber, { pageSize: config.pageSize, headed: config.headed })
+      : await discoverCurrysPage(config.catalogueUrl, pageNumber, { pageSize: config.pageSize, headed: config.headed });
     const checkpoint = { ...discovery, mode: config.mode, productResults: [], completedProductCount: 0, checkpointedAt: new Date().toISOString() };
     await writeCheckpoint(outputDirectory, pageNumber, checkpoint);
 
@@ -117,7 +162,7 @@ export async function runCatalogue(config) {
     if (config.mode === "controlled-crawl") {
       const { verifyProduct } = await import("./runner.mjs");
       for (const productUrl of discovery.productUrls) {
-        const itemNumber = currysItemNumber(productUrl);
+        const itemNumber = config.retailer === "argos" ? argosItemNumber(productUrl) : currysItemNumber(productUrl);
         const productDirectory = path.join(outputDirectory, `page-${String(pageNumber).padStart(4, "0")}`);
         const result = await verifyProduct({
           url: productUrl,
@@ -127,6 +172,7 @@ export async function runCatalogue(config) {
           headed: config.headed,
           outputDirectory: productDirectory,
           delayMs: config.delayMs,
+          retailer: config.retailer,
         });
         const { attempts: _attempts, ...compactResult } = result;
         checkpoint.productResults.push(compactResult);
@@ -156,7 +202,7 @@ export async function runCatalogue(config) {
     schemaVersion: 1,
     status: overallStatus,
     eligible: false,
-    retailer: "currys",
+    retailer: config.retailer,
     mode: config.mode,
     catalogueUrl: config.catalogueUrl,
     startPage: config.startPage,
