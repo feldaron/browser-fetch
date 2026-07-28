@@ -2,6 +2,7 @@ import { isIP } from "node:net";
 
 const RETAILER_HOSTS = Object.freeze({
   currys: ["currys.co.uk", "www.currys.co.uk", "business.currys.co.uk"],
+  argos: ["argos.co.uk", "www.argos.co.uk"],
 });
 
 export function allowedHosts(retailer) {
