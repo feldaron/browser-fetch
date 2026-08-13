@@ -63,7 +63,7 @@ function selectedJsonFields(value, prefix = "", output = [], seen = new Set()) {
   seen.add(value);
   for (const [key, entry] of Object.entries(value)) {
     const current = prefix ? `${prefix}.${key}` : key;
-    if (/price|currency|availability|stock|inventory|ats|sku|product.?id|pid|ean|gtin|mpn/i.test(key)) {
+    if (/price|currency|availability|stock|inventory|ats|sku|product.?id|pid|ean|gtin|mpn/i.test(current)) {
       if (entry === null || ["string", "number", "boolean"].includes(typeof entry)) output.push([current, entry]);
       else if (Array.isArray(entry) && entry.every((item) => ["string", "number", "boolean"].includes(typeof item))) output.push([current, entry]);
     }
