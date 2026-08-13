@@ -98,9 +98,13 @@ export async function probeEndpoint(endpoint, item, options = {}) {
   const blocked = [403, 429].includes(response.status) || BLOCK.test([title, heading, body.slice(0, 12000)].filter(Boolean).join("\n"));
   const serialized = json ? JSON.stringify(json) : body;
   const containsItem = serialized.includes(item);
-  const prices = priceCandidates(json ? JSON.stringify(selectedJsonFields(json)) : visibleText);
-  const availability = availabilitySignals(serialized);
   const selectedFields = json ? selectedJsonFields(json) : [];
+  const structuredPrices = selectedFields
+    .filter(([field, value]) => /price/i.test(field) && (typeof value === "number" || typeof value === "string"))
+    .map(([, value]) => Number(String(value).replace(/,/g, "")))
+    .filter((value) => Number.isFinite(value) && value >= 20 && value <= 20000);
+  const prices = json ? [...new Set(structuredPrices)].slice(0, 30) : priceCandidates(visibleText);
+  const availability = availabilitySignals(serialized);
   const useful = response.status === 200 && !blocked && containsItem && prices.length > 0 && availability.length > 0;
   return {
     endpoint: endpoint.name,
