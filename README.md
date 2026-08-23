@@ -128,3 +128,8 @@ automation launch flags.
 
 Owner-authored `[browser]` issues can select the browser with a JSON `browser`
 property (`"firefox"` or `"chrome"`). Firefox is used when the property is omitted.
+
+Files downloaded in either browser are saved under
+`/tmp/private-browser/downloads`. The workflow includes that directory in its
+`private-browser-logs-<run-id>` artifact, so downloads remain retrievable after
+the temporary browser session ends.

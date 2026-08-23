@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const rawUrl = process.argv[2] ?? "https://www.currys.co.uk/";
@@ -19,8 +19,43 @@ const executable = process.env.PRIVATE_BROWSER_EXECUTABLE ??
 const profileRoot = process.env.PRIVATE_BROWSER_PROFILE_ROOT ??
   "/tmp/private-browser-profile";
 const profileDirectory = path.join(profileRoot, browserName);
+const downloadDirectory = process.env.PRIVATE_BROWSER_DOWNLOAD_DIRECTORY ??
+  "/tmp/private-browser/downloads";
 
-await mkdir(profileDirectory, { recursive: true });
+await Promise.all([
+  mkdir(profileDirectory, { recursive: true }),
+  mkdir(downloadDirectory, { recursive: true }),
+]);
+
+if (browserName === "firefox") {
+  const downloadPreference = JSON.stringify(downloadDirectory);
+  await writeFile(
+    path.join(profileDirectory, "user.js"),
+    [
+      `user_pref("browser.download.dir", ${downloadPreference});`,
+      'user_pref("browser.download.folderList", 2);',
+      'user_pref("browser.download.useDownloadDir", true);',
+      'user_pref("browser.download.alwaysOpenPanel", false);',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+} else {
+  const defaultProfileDirectory = path.join(profileDirectory, "Default");
+  await mkdir(defaultProfileDirectory, { recursive: true });
+  await writeFile(
+    path.join(defaultProfileDirectory, "Preferences"),
+    `${JSON.stringify({
+      download: {
+        default_directory: downloadDirectory,
+        directory_upgrade: true,
+        prompt_for_download: false,
+      },
+      safebrowsing: { enabled: true },
+    })}\n`,
+    "utf8",
+  );
+}
 
 const args = browserName === "firefox"
   ? [
