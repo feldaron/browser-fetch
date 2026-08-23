@@ -4,10 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       start_url:
-        description: Page to open when Chrome starts
+        description: Page to open when the browser starts
         required: false
         default: https://www.currys.co.uk/
         type: string
+      browser:
+        description: Browser for the interactive private desktop
+        required: true
+        default: firefox
+        type: choice
+        options:
+          - firefox
+          - chrome
       duration_minutes:
         description: Session length from 15 to 300 minutes
         required: false
@@ -46,10 +54,12 @@ jobs:
         shell: bash
         env:
           MANUAL_START_URL: ${{ inputs.start_url }}
+          MANUAL_BROWSER: ${{ inputs.browser }}
           MANUAL_DURATION: ${{ inputs.duration_minutes }}
         run: |
           set -euo pipefail
           start_url="${MANUAL_START_URL:-https://www.currys.co.uk/}"
+          browser="${MANUAL_BROWSER:-firefox}"
           duration="${MANUAL_DURATION:-60}"
           issue_number=""
 
@@ -57,11 +67,16 @@ jobs:
             issue_number="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
             body="$(jq -r '.issue.body // "{}"' "$GITHUB_EVENT_PATH")"
             start_url="$(jq -er 'fromjson | .startUrl // "https://www.currys.co.uk/"' <<<"$body")"
+            browser="$(jq -er 'fromjson | .browser // "firefox"' <<<"$body")"
             duration="$(jq -er 'fromjson | .durationMinutes // 60 | tostring' <<<"$body")"
           fi
 
           [[ "$start_url" =~ ^https?://[^[:space:]]+$ ]] || {
             echo "startUrl must be a single http or https URL" >&2
+            exit 1
+          }
+          [[ "$browser" == "firefox" || "$browser" == "chrome" ]] || {
+            echo "browser must be firefox or chrome" >&2
             exit 1
           }
           [[ "$duration" =~ ^[0-9]+$ ]] || {
@@ -74,6 +89,7 @@ jobs:
           }
 
           echo "start_url=$start_url" >> "$GITHUB_OUTPUT"
+          echo "browser=$browser" >> "$GITHUB_OUTPUT"
           echo "duration=$duration" >> "$GITHUB_OUTPUT"
           echo "issue_number=$issue_number" >> "$GITHUB_OUTPUT"
 
@@ -89,10 +105,27 @@ jobs:
       - name: Install JavaScript and desktop dependencies
         run: |
           npm install --ignore-scripts --no-audit --no-fund
-          google-chrome --version
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             xvfb openbox x11vnc novnc websockify
+
+      - name: Install selected browser
+        id: browser
+        shell: bash
+        env:
+          PRIVATE_BROWSER: ${{ steps.settings.outputs.browser }}
+        run: |
+          set -euo pipefail
+          if [[ "$PRIVATE_BROWSER" == "firefox" ]]; then
+            npx playwright install --with-deps firefox
+            executable="$(node --input-type=module -e \
+              'import { firefox } from "playwright"; process.stdout.write(firefox.executablePath())')"
+          else
+            google-chrome --version
+            executable="$(command -v google-chrome)"
+          fi
+          test -x "$executable"
+          echo "executable=$executable" >> "$GITHUB_OUTPUT"
 
       - name: Install cloudflared
         run: |
@@ -102,10 +135,12 @@ jobs:
           sudo dpkg -i /tmp/cloudflared.deb
           cloudflared --version
 
-      - name: Start virtual desktop and Chrome
+      - name: Start virtual desktop and browser
         shell: bash
         env:
           START_URL: ${{ steps.settings.outputs.start_url }}
+          PRIVATE_BROWSER: ${{ steps.settings.outputs.browser }}
+          PRIVATE_BROWSER_EXECUTABLE: ${{ steps.browser.outputs.executable }}
         run: |
           set -euo pipefail
           mkdir -p /tmp/private-browser /tmp/novnc
@@ -136,7 +171,7 @@ jobs:
           websockify --web=/tmp/novnc 6080 localhost:5900 \
             > /tmp/private-browser/websockify.log 2>&1 &
           node scripts/launch-private-browser.mjs "$START_URL" \
-            > /tmp/private-browser/chrome.log 2>&1 &
+            > /tmp/private-browser/browser.log 2>&1 &
 
           for attempt in {1..30}; do
             curl --fail --silent http://127.0.0.1:6080/ > /dev/null && exit 0
@@ -144,7 +179,7 @@ jobs:
           done
           echo "noVNC did not become ready" >&2
           cat /tmp/private-browser/websockify.log >&2 || true
-          cat /tmp/private-browser/chrome.log >&2 || true
+          cat /tmp/private-browser/browser.log >&2 || true
           exit 1
 
       - name: Connect privatebrowser.laptopvalue.co.uk
@@ -174,9 +209,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.settings.outputs.issue_number }}
           DURATION: ${{ steps.settings.outputs.duration }}
+          PRIVATE_BROWSER: ${{ steps.settings.outputs.browser }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" \
-            -f body="The private Chrome session is available at https://privatebrowser.laptopvalue.co.uk for up to ${DURATION} minutes. Cloudflare Access authentication is required."
+            -f body="The private ${PRIVATE_BROWSER} session is available at https://privatebrowser.laptopvalue.co.uk for up to ${DURATION} minutes. Cloudflare Access authentication is required."
 
       - name: Keep browser session available
         env:

@@ -1,4 +1,6 @@
-import { chromium } from "playwright";
+import { spawn } from "node:child_process";
+import { mkdir } from "node:fs/promises";
+import path from "node:path";
 
 const rawUrl = process.argv[2] ?? "https://www.currys.co.uk/";
 const startUrl = new URL(rawUrl);
@@ -7,48 +9,67 @@ if (!["http:", "https:"].includes(startUrl.protocol)) {
   throw new Error("The private browser start URL must use http or https.");
 }
 
-const context = await chromium.launchPersistentContext(
-  "/tmp/private-browser-profile",
-  {
-    channel: "chrome",
-    headless: false,
-    viewport: null,
-    locale: "en-GB",
-    timezoneId: "Europe/London",
-    args: [
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-infobars",
-      "--start-maximized",
-      "--window-size=1600,1000",
-    ],
-  },
-);
-
-const pages = context.pages();
-const page = pages[0] ?? (await context.newPage());
-
-await page
-  .goto(startUrl.toString(), {
-    waitUntil: "domcontentloaded",
-    timeout: 45_000,
-  })
-  .catch((error) => {
-    console.error(
-      `Initial navigation failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  });
-
-console.log(`Private browser opened at ${startUrl.toString()}`);
-
-let closing = false;
-async function close() {
-  if (closing) return;
-  closing = true;
-  await context.close().catch(() => undefined);
-  process.exit(0);
+const browserName = (process.env.PRIVATE_BROWSER ?? "firefox").toLowerCase();
+if (!["chrome", "firefox"].includes(browserName)) {
+  throw new Error(`Unsupported private browser: ${browserName}`);
 }
 
-process.on("SIGINT", close);
-process.on("SIGTERM", close);
-await new Promise(() => undefined);
+const executable = process.env.PRIVATE_BROWSER_EXECUTABLE ??
+  (browserName === "firefox" ? "firefox" : "google-chrome");
+const profileRoot = process.env.PRIVATE_BROWSER_PROFILE_ROOT ??
+  "/tmp/private-browser-profile";
+const profileDirectory = path.join(profileRoot, browserName);
+
+await mkdir(profileDirectory, { recursive: true });
+
+const args = browserName === "firefox"
+  ? [
+      "--no-remote",
+      "--new-instance",
+      "--profile",
+      profileDirectory,
+      "--width",
+      "1600",
+      "--height",
+      "1000",
+      startUrl.toString(),
+    ]
+  : [
+      `--user-data-dir=${profileDirectory}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-background-networking",
+      "--start-maximized",
+      "--window-size=1600,1000",
+      startUrl.toString(),
+    ];
+
+const browser = spawn(executable, args, {
+  env: process.env,
+  stdio: "inherit",
+});
+
+browser.on("error", (error) => {
+  console.error(`Unable to start ${browserName}: ${error.message}`);
+  process.exitCode = 1;
+});
+
+console.log(`Private ${browserName} opened at ${startUrl.toString()}`);
+
+let closing = false;
+function close(signal) {
+  if (closing) return;
+  closing = true;
+  browser.kill(signal);
+}
+
+process.on("SIGINT", () => close("SIGINT"));
+process.on("SIGTERM", () => close("SIGTERM"));
+
+const exitCode = await new Promise((resolve) => {
+  browser.once("exit", (code, signal) => {
+    resolve(code ?? (signal ? 1 : 0));
+  });
+});
+
+process.exitCode = exitCode;

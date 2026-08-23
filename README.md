@@ -116,3 +116,15 @@ Currys page numbers are translated to `start=(page-1)*pageSize` and `sz=pageSize
 ## Protected correction
 
 Currys item `10296598` is the Acer Swift 16 AI, MPN `NX.JU1EK.001`, EAN `4711474906946`. The known robust correction is **£1,799**, not £1,599. The included fixture and tests protect that identity and price expectation; a live run still has to verify the current retailer page before any new observation is imported.
+
+## Private interactive browser
+
+Open **Actions → Private browser session → Run workflow** to start a temporary
+interactive desktop at `privatebrowser.laptopvalue.co.uk`. Firefox is the default;
+Chrome remains available as a workflow choice. The selected browser is launched
+directly as a normal desktop process rather than through Playwright, so the manual
+session does not show Chrome's test-software banner or inherit Playwright's
+automation launch flags.
+
+Owner-authored `[browser]` issues can select the browser with a JSON `browser`
+property (`"firefox"` or `"chrome"`). Firefox is used when the property is omitted.
