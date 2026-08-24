@@ -1,0 +1,73 @@
+name: Currys SFCC endpoint probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      item_number:
+        description: Exact eight-digit Currys item number
+        required: true
+        default: "10296598"
+        type: string
+  pull_request:
+    branches:
+      - main
+    paths:
+      - src/currys-sfcc-probe.mjs
+      - tests/currys-sfcc-probe.test.mjs
+      - .github/workflows/currys-sfcc-probe.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: currys-sfcc-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run SFCC probe tests
+        run: node --test tests/currys-sfcc-probe.test.mjs
+      - name: Probe permitted Currys SFCC routes
+        id: probe
+        continue-on-error: true
+        shell: bash
+        env:
+          DISPATCH_ITEM_NUMBER: ${{ inputs.item_number }}
+        run: |
+          mkdir -p results/sfcc
+          CURRYS_ITEM_NUMBER="${DISPATCH_ITEM_NUMBER:-10296598}" \
+          RESULTS_DIR="results/sfcc" \
+          node src/currys-sfcc-probe.mjs > results/currys-sfcc-probe.json
+      - name: Add compact result to summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f results/currys-sfcc-probe.json ]]; then
+            {
+              echo '## Currys SFCC endpoint probe'
+              echo
+              echo 'Read-only endpoint access was tested under the permission confirmed by the project owner.'
+              echo
+              node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync("results/currys-sfcc-probe.json","utf8")); console.log(JSON.stringify({status:r.status,retailerItemNumber:r.retailerItemNumber,usefulEndpoints:r.usefulEndpoints,attempts:r.attempts.map(a=>({endpoint:a.endpoint,httpStatus:a.httpStatus,responseKind:a.responseKind,blocked:a.blocked,containsRequestedItem:a.containsRequestedItem,useful:a.useful,priceCandidates:a.priceCandidates,availabilitySignals:a.availabilitySignals,selectedJsonFields:a.selectedJsonFields}))},null,2))'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'The SFCC probe failed before producing JSON evidence.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload endpoint evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: currys-sfcc-probe-${{ github.run_id }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Preserve probe conclusion
+        if: steps.probe.outcome == 'failure'
+        run: exit 1

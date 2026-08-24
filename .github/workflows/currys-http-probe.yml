@@ -1,0 +1,81 @@
+name: Currys HTTP endpoint probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_url:
+        description: Exact Currys consumer product URL
+        required: true
+        default: https://www.currys.co.uk/products/acer-swift-16-ai-16-laptop-copilot-pc-intel-core-ultra-x7-1-tb-ssd-grey-10296598.html
+        type: string
+      repeat_count:
+        description: Independent HTTP readings (1-5)
+        required: true
+        default: "3"
+        type: string
+  pull_request:
+    branches:
+      - main
+    paths:
+      - src/currys-http-probe.mjs
+      - tests/currys-http-probe.test.mjs
+      - .github/workflows/currys-http-probe.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: currys-http-probe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DEFAULT_PRODUCT_URL: https://www.currys.co.uk/products/acer-swift-16-ai-16-laptop-copilot-pc-intel-core-ultra-x7-1-tb-ssd-grey-10296598.html
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run unit tests
+        run: node --test tests/currys-http-probe.test.mjs
+      - name: Probe Currys without Chrome
+        id: probe
+        continue-on-error: true
+        shell: bash
+        env:
+          DISPATCH_PRODUCT_URL: ${{ inputs.product_url }}
+          DISPATCH_REPEAT_COUNT: ${{ inputs.repeat_count }}
+        run: |
+          mkdir -p results
+          PRODUCT_URL="${DISPATCH_PRODUCT_URL:-$DEFAULT_PRODUCT_URL}" \
+          REPEAT_COUNT="${DISPATCH_REPEAT_COUNT:-3}" \
+          node src/currys-http-probe.mjs > results/currys-http-probe.json
+      - name: Add compact result to summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f results/currys-http-probe.json ]]; then
+            {
+              echo '## Currys HTTP probe'
+              echo
+              echo 'No browser, cookies, login, CAPTCHA handling or private storefront route was used.'
+              echo
+              node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync("results/currys-http-probe.json","utf8")); console.log(JSON.stringify({status:r.status,eligible:r.eligible,retailerItemNumber:r.retailerItemNumber,mainPurchasePrice:r.mainPurchasePrice,currency:r.currency,availability:r.availability,inStock:r.inStock,httpStatus:r.httpStatus,canonicalUrl:r.canonicalUrl,verificationMethod:r.verificationMethod,conflicts:r.conflicts,repeatCountCompleted:r.repeatCountCompleted},null,2))'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'The probe failed before producing JSON evidence.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: currys-http-probe-${{ github.run_id }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Preserve probe conclusion
+        if: steps.probe.outcome == 'failure'
+        run: exit 1
