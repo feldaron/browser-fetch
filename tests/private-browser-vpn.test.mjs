@@ -20,7 +20,7 @@ test("private browser defaults to Firefox and gates exposure on a verified VPN",
   assert.ok(verifyPosition >= 0 && tunnelPosition > verifyPosition);
 });
 
-test("Firefox stages the official add-on and resolves its runtime origin without privileged APIs", async () => {
+test("Firefox stages the official add-on and resolves its runtime origin from the WebDriver profile", async () => {
   const [workflow, launcher, vpnSetup, vpnRuntime] = await Promise.all([
     readFile(workflowPath, "utf8"),
     readFile(launcherPath, "utf8"),
@@ -31,7 +31,9 @@ test("Firefox stages the official add-on and resolves its runtime origin without
   assert.match(workflow, /BROWSEC_FIREFOX_EXTENSION_ID/);
   assert.match(launcher, /BROWSEC_FIREFOX_EXTENSION_ID/);
   assert.match(vpnSetup, /browsec@browsec\.com/);
-  assert.match(vpnSetup, /about:debugging#\/runtime\/this-firefox/);
+  assert.match(vpnSetup, /extensions\.webextensions\.uuids/);
+  assert.match(vpnSetup, /moz:profile/);
+  assert.doesNotMatch(vpnSetup, /about:debugging#\/runtime\/this-firefox/);
   assert.doesNotMatch(vpnSetup, /ChromeUtils\.importESModule/);
   assert.match(vpnRuntime, /selenium-webdriver/);
   assert.match(vpnRuntime, /restart-persistent/);
