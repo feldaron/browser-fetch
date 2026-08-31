@@ -176,70 +176,103 @@ if (browserName === "chrome") {
     throw new Error("Firefox did not persist Browsec's runtime moz-extension UUID in its profile.");
   }
 
-  async function openExtensionPage(driver, uuid) {
-    const target = `moz-extension://${uuid}/popup/popup.html`;
-    let lastObservedUri = "";
-
+  async function activateBrowsec(driver) {
+    await driver.setContext("chrome");
+    let result;
     try {
-      await driver.setContext("chrome");
-      const opened = await driver.executeScript(`
-        const target = arguments[0];
-        const { Services } = ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs');
-        const tabbrowser = window.gBrowser;
-        if (!tabbrowser) return false;
-        const principal = Services.scriptSecurityManager.getSystemPrincipal();
-        const tab = tabbrowser.addTab(target, { triggeringPrincipal: principal });
-        if (!tab) return false;
-        tabbrowser.selectedTab = tab;
-        return true;
-      `, target);
-      if (!opened) throw new Error("Firefox browser chrome did not create a Browsec tab.");
+      result = await driver.executeAsyncScript(`
+        const extensionId = arguments[0];
+        const country = arguments[1];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const { ExtensionParent } = ChromeUtils.importESModule(
+            'resource://gre/modules/ExtensionParent.sys.mjs'
+          );
+          const { ExtensionStorage } = ChromeUtils.importESModule(
+            'resource://gre/modules/ExtensionStorage.sys.mjs'
+          );
+          const { ExtensionStorageIDB } = ChromeUtils.importESModule(
+            'resource://gre/modules/ExtensionStorageIDB.sys.mjs'
+          );
 
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        lastObservedUri = await driver.executeScript(
-          "return window.gBrowser?.selectedBrowser?.currentURI?.spec ?? '';",
-        ).catch(() => "");
-        if (typeof lastObservedUri === "string" && lastObservedUri.startsWith(target)) {
-          await driver.setContext("content");
-          await sleep(500);
-          return;
-        }
-        await sleep(250);
-      }
+          let extension;
+          for (let attempt = 0; attempt < 40; attempt += 1) {
+            extension = ExtensionParent.GlobalManager.getExtension(extensionId);
+            if (extension) break;
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+          if (!extension) throw new Error('Browsec extension is not active in Firefox');
+
+          const selected = await ExtensionStorageIDB.selectBackend({ extension });
+          let stored;
+          let backend;
+
+          if (selected.backendEnabled) {
+            const storagePrincipal = ExtensionStorageIDB.getStoragePrincipal(extension);
+            const db = await ExtensionStorageIDB.open(
+              storagePrincipal,
+              extension.hasPermission('unlimitedStorage')
+            );
+            try {
+              stored = await db.get('userPac');
+              const current = stored?.userPac && typeof stored.userPac === 'object'
+                ? stored.userPac
+                : {};
+              const next = {
+                ...current,
+                mode: 'proxy',
+                country,
+                broken: false,
+                filters: Array.isArray(current.filters) ? current.filters : [],
+              };
+              const changes = await db.set({ userPac: next });
+              if (changes) ExtensionStorageIDB.notifyListeners(extension.id, changes);
+              backend = 'IndexedDB';
+              return { backend, next };
+            } finally {
+              db.close?.();
+            }
+          }
+
+          stored = await ExtensionStorage.get(extension.id, 'userPac');
+          const current = stored?.userPac && typeof stored.userPac === 'object'
+            ? stored.userPac
+            : {};
+          const next = {
+            ...current,
+            mode: 'proxy',
+            country,
+            broken: false,
+            filters: Array.isArray(current.filters) ? current.filters : [],
+          };
+          await ExtensionStorage.set(extension.id, { userPac: next });
+          backend = 'JSONFile';
+          return { backend, next };
+        })()
+          .then(({ backend, next }) => done({
+            ok: true,
+            backend,
+            mode: next.mode,
+            country: next.country,
+            filters: next.filters.length,
+          }))
+          .catch((error) => done({
+            ok: false,
+            error: String(error?.message ?? error),
+            stack: String(error?.stack ?? ''),
+          }));
+      `, FIREFOX_EXTENSION_ID, VPN_COUNTRY);
     } finally {
       await driver.setContext("content").catch(() => {});
     }
 
-    throw new Error(
-      `Firefox could not open Browsec's extension page in a privileged tab; last URI: ${lastObservedUri || "unknown"}.`,
-    );
-  }
-
-  async function activateBrowsec(driver, uuid) {
-    await openExtensionPage(driver, uuid);
-    const result = await driver.executeAsyncScript(`
-      const country = arguments[0];
-      const done = arguments[arguments.length - 1];
-      (async () => {
-        const api = globalThis.browser ?? globalThis.chrome;
-        if (!api?.storage?.local) throw new Error('extension storage API unavailable');
-        const stored = await api.storage.local.get('userPac');
-        const current = stored?.userPac && typeof stored.userPac === 'object' ? stored.userPac : {};
-        const next = {
-          ...current,
-          mode: 'proxy',
-          country,
-          broken: false,
-          filters: Array.isArray(current.filters) ? current.filters : [],
-        };
-        await api.storage.local.set({ userPac: next });
-        done({ ok: true, mode: next.mode, country: next.country, filters: next.filters.length });
-      })().catch((error) => done({ ok: false, error: String(error?.message ?? error) }));
-    `, VPN_COUNTRY);
     if (!result?.ok) {
-      throw new Error(`Firefox could not persist Browsec proxy state: ${result?.error ?? "unknown error"}`);
+      throw new Error(
+        `Firefox could not persist Browsec proxy state: ${result?.error ?? "unknown error"}` +
+        (result?.stack ? `\n${result.stack}` : "")
+      );
     }
-    console.log(`Browsec Firefox proxy state saved: ${JSON.stringify(result)}`);
+    console.log(`Browsec Firefox proxy state saved through ${result.backend}: ${JSON.stringify(result)}`);
   }
 
   async function persistRuntimeProfile(driver) {
@@ -264,7 +297,7 @@ if (browserName === "chrome") {
   try {
     const uuid = await resolveFirefoxExtensionUuid(driver);
     console.log(`Resolved Firefox Browsec runtime UUID: ${uuid}`);
-    await activateBrowsec(driver, uuid);
+    await activateBrowsec(driver);
     vpnIp = await waitForChangedIp(driver, baselineIp, 20);
     if (!vpnIp || vpnIp === baselineIp) {
       throw new Error(`${PROVIDER} did not change the Firefox public IP.`);
