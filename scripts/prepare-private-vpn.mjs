@@ -76,19 +76,20 @@ runtimeSource = runtimeSource.replace(
       const extensions = JSON.parse(await readFile(path.join(runtimeProfile, "extensions.json"), "utf8"));
       const addon = extensions?.addons?.find((entry) => entry?.id === FIREFOX_EXTENSION_ID);
       const rootUri = addon?.rootURI ?? addon?.rootUri;
-      const match = typeof rootUri === "string"
-        ? rootUri.match(/^moz-extension:\/\/([^/]+)\//)
-        : null;
-      if (match?.[1]) {
-        firefoxExtensionUuid = match[1];
-        console.log(\`Resolved Firefox Browsec runtime UUID from profile: \${firefoxExtensionUuid}\`);
-        return;
+      if (typeof rootUri === "string" && rootUri.startsWith("moz-extension://")) {
+        firefoxExtensionUuid = new URL(rootUri).hostname;
+        if (firefoxExtensionUuid) {
+          console.log(\`Resolved Firefox Browsec runtime UUID from profile: \${firefoxExtensionUuid}\`);
+          return;
+        }
       }
 
       const prefs = await readFile(path.join(runtimeProfile, "prefs.js"), "utf8").catch(() => "");
-      const prefMatch = prefs.match(/user_pref\\("extensions\\.webextensions\\.uuids",\\s*"((?:\\\\.|[^"\\\\])*)"\\);/);
-      if (prefMatch?.[1]) {
-        const decoded = JSON.parse(\`"\${prefMatch[1]}"\`);
+      const marker = 'user_pref("extensions.webextensions.uuids", ';
+      const line = prefs.split("\\n").find((candidate) => candidate.startsWith(marker));
+      if (line) {
+        const encoded = line.slice(marker.length).replace(/;\\s*$/, "").trim();
+        const decoded = JSON.parse(encoded);
         const uuids = JSON.parse(decoded);
         if (typeof uuids?.[FIREFOX_EXTENSION_ID] === "string") {
           firefoxExtensionUuid = uuids[FIREFOX_EXTENSION_ID];
