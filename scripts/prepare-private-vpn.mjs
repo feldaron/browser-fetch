@@ -48,7 +48,7 @@ if (browserName === "firefox") {
   const crx = Buffer.from(await response.arrayBuffer());
   if (crx.length < 1_000) throw new Error("Downloaded Browsec CRX is unexpectedly small.");
   await writeFile(crxPath, crx);
-  console.log(`Downloaded official Browsec Chrome package (${crx.length} bytes).`);
+  console.log(`Downloaded official Browsec Chrome package (${crx.length} bytes) for provenance.`);
 } else {
   throw new Error(`Unsupported private browser: ${browserName}`);
 }
@@ -56,9 +56,6 @@ if (browserName === "firefox") {
 const runtimeSourcePath = new URL("./prepare-private-vpn-runtime.mjs", import.meta.url);
 let runtimeSource = await readFile(runtimeSourcePath, "utf8");
 
-// Give Firefox a deterministic moz-extension hostname in the temporary profile.
-// That avoids privileged browser-internal APIs, which Firefox 154 no longer exposes
-// to WebDriver scripts, while keeping the extension itself official and unmodified.
 runtimeSource = runtimeSource.replace(
   /async function resolveFirefoxExtensionUuid\(driver\) \{[\s\S]*?\n\}\n\nfunction popupUrl\(\)/,
   `async function resolveFirefoxExtensionUuid(driver) {
@@ -73,12 +70,13 @@ runtimeSource = runtimeSource.replace(
   `.setPreference("extensions.enabledScopes", 15)\n    .setPreference("extensions.webextensions.uuids", JSON.stringify({\n      [FIREFOX_EXTENSION_ID]: "${FIREFOX_EXTENSION_UUID}",\n    }));`,
 );
 
-// ChromeDriver intentionally blocks direct chrome-extension:// navigation even
-// when Browsec is installed. Use Chrome's DevTools endpoint to talk to Browsec's
-// own service worker instead. We change only Browsec's own local state, then rely
-// on Browsec's storage listener to apply its proxy configuration. The external-IP
-// gate below remains authoritative: if Browsec does not really route traffic, the
-// workflow still fails closed.
+// Chrome uses the same managed-policy installation as the real private-browser
+// workflow. Do not also inject a transient WebDriver copy of Browsec.
+runtimeSource = runtimeSource.replace(
+  `      options.addExtensions(chromeCrxPath);`,
+  `      console.log("Chrome Browsec package verified; managed policy performs installation.");`,
+);
+
 const chromeWorkerHelpers = `
 async function chromeWorkerEvaluate(driver, expression) {
   const capabilities = await driver.getCapabilities();
@@ -86,17 +84,23 @@ async function chromeWorkerEvaluate(driver, expression) {
   const debuggerAddress = chromeOptions.debuggerAddress;
   if (!debuggerAddress) throw new Error("ChromeDriver did not expose a DevTools debugger address.");
 
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const targets = await fetch(\`http://\${debuggerAddress}/json/list\`)
+  let lastTargets = [];
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    // Visiting a normal page gives managed extension installation/startup events
+    // time to complete without navigating to a blocked chrome-extension:// URL.
+    if (attempt === 0) {
+      await driver.get("https://example.com/").catch(() => {});
+    }
+    lastTargets = await fetch(\`http://\${debuggerAddress}/json/list\`)
       .then((response) => response.json())
       .catch(() => []);
-    const target = targets.find((entry) =>
+    const target = lastTargets.find((entry) =>
       ["service_worker", "background_page"].includes(entry.type) &&
       String(entry.url || "").startsWith("chrome-extension://${CHROME_EXTENSION_ID}/") &&
       entry.webSocketDebuggerUrl
     );
     if (!target) {
-      await sleep(500);
+      await sleep(1_000);
       continue;
     }
 
@@ -135,7 +139,8 @@ async function chromeWorkerEvaluate(driver, expression) {
     }
   }
 
-  throw new Error("Browsec Chrome service worker did not become available.");
+  const summary = lastTargets.map((entry) => ({ type: entry.type, url: entry.url })).slice(0, 30);
+  throw new Error(\`Browsec Chrome service worker did not become available. Targets: \${JSON.stringify(summary)}\`);
 }
 `;
 runtimeSource = runtimeSource.replace(
