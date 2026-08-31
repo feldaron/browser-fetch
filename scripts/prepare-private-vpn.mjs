@@ -1,7 +1,12 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { isIP } from "node:net";
 import path from "node:path";
-import { chromium, firefox } from "playwright";
+
+const require = createRequire(import.meta.url);
+const { Builder, By } = require("selenium-webdriver");
+const chrome = require("selenium-webdriver/chrome");
+const firefox = require("selenium-webdriver/firefox");
 
 const PROVIDER = "Browsec";
 const CHROME_EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh";
@@ -18,15 +23,29 @@ const executable = process.env.PRIVATE_BROWSER_EXECUTABLE ??
 const profileRoot = process.env.PRIVATE_BROWSER_PROFILE_ROOT ??
   "/tmp/private-browser-profile";
 const profileDirectory = path.join(profileRoot, browserName);
+const downloadDirectory = process.env.PRIVATE_BROWSER_DOWNLOAD_DIRECTORY ??
+  "/tmp/private-browser/downloads";
 const statusPath = process.env.PRIVATE_BROWSER_VPN_STATUS ??
   "/tmp/private-browser/vpn-status.json";
 const diagnosticsDirectory = path.dirname(statusPath);
+const firefoxXpiPath = path.join(
+  profileDirectory,
+  "extensions",
+  `${FIREFOX_EXTENSION_ID}.xpi`,
+);
 
-await mkdir(profileDirectory, { recursive: true });
-await mkdir(diagnosticsDirectory, { recursive: true });
+await Promise.all([
+  mkdir(profileDirectory, { recursive: true }),
+  mkdir(downloadDirectory, { recursive: true }),
+  mkdir(diagnosticsDirectory, { recursive: true }),
+]);
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function extractIp(text) {
-  const trimmed = text.trim();
+  const trimmed = String(text ?? "").trim();
 
   try {
     const parsed = JSON.parse(trimmed);
@@ -54,7 +73,7 @@ async function fetchIpOutsideBrowser() {
   for (const endpoint of endpoints) {
     try {
       const response = await fetch(endpoint, {
-        headers: { "user-agent": "LaptopValue-private-browser-vpn-check/1.0" },
+        headers: { "user-agent": "LaptopValue-private-browser-vpn-check/2.0" },
         signal: AbortSignal.timeout(10_000),
       });
       if (!response.ok) continue;
@@ -68,365 +87,412 @@ async function fetchIpOutsideBrowser() {
   throw new Error("Unable to determine the runner public IP before enabling the VPN.");
 }
 
-async function bodyText(page) {
-  if (page.isClosed()) return "";
-  return page.locator("body").innerText({ timeout: 3_000 }).catch(() => "");
-}
+const deepSnapshotScript = `
+  const nodes = [];
+  const visit = (root) => {
+    for (const element of root.querySelectorAll('*')) {
+      nodes.push(element);
+      if (element.shadowRoot) visit(element.shadowRoot);
+    }
+  };
+  visit(document);
+  return nodes.slice(0, 250).map((element) => ({
+    tag: element.tagName,
+    text: String(element.innerText || element.textContent || '').trim().slice(0, 300),
+    role: element.getAttribute('role'),
+    ariaLabel: element.getAttribute('aria-label'),
+    ariaChecked: element.getAttribute('aria-checked'),
+    ariaDisabled: element.getAttribute('aria-disabled'),
+    disabled: Boolean(element.disabled),
+    type: element.getAttribute('type'),
+    value: element.getAttribute('value'),
+    className: typeof element.className === 'string' ? element.className : '',
+  }));
+`;
 
-function isBrowsecPage(page) {
-  if (page.isClosed()) return false;
+const acceptTermsScript = `
+  const nodes = [];
+  const visit = (root) => {
+    for (const element of root.querySelectorAll('*')) {
+      nodes.push(element);
+      if (element.shadowRoot) visit(element.shadowRoot);
+    }
+  };
+  visit(document);
+  const label = (element) => [
+    element.innerText,
+    element.textContent,
+    element.getAttribute('aria-label'),
+    element.getAttribute('title'),
+    element.getAttribute('value'),
+  ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+  const allText = nodes.map(label).join(' ');
+  if (!/(terms|privacy policy)/i.test(allText) || !/(accept|agree|consent|continue)/i.test(allText)) {
+    return { found: false, accepted: false, toggled: 0 };
+  }
+
+  const accept = nodes.find((element) => {
+    const text = label(element);
+    const clickable = ['BUTTON', 'A', 'LABEL', 'INPUT'].includes(element.tagName) ||
+      ['button', 'link'].includes(element.getAttribute('role'));
+    return clickable && /^(accept|agree|continue|confirm)(\\b|\\s)/i.test(text);
+  });
+
+  if (accept && !accept.disabled && accept.getAttribute('aria-disabled') !== 'true') {
+    accept.click();
+    return { found: true, accepted: true, toggled: 0 };
+  }
+
+  let toggled = 0;
+  for (const element of nodes) {
+    const role = element.getAttribute('role');
+    const type = element.getAttribute('type');
+    const isToggle = type === 'checkbox' || role === 'checkbox' || role === 'switch' ||
+      element.tagName.toLowerCase() === 'c-switch';
+    if (!isToggle) continue;
+
+    const aria = element.getAttribute('aria-checked');
+    const classes = typeof element.className === 'string' ? element.className : '';
+    const checked = type === 'checkbox' && 'checked' in element
+      ? Boolean(element.checked)
+      : aria === 'true' || /(^|[\\s_-])(on|active|checked|enabled)([\\s_-]|$)/i.test(classes);
+    if (!checked) {
+      element.click();
+      toggled += 1;
+    }
+  }
+
+  const acceptAfter = nodes.find((element) => {
+    const text = label(element);
+    const clickable = ['BUTTON', 'A', 'LABEL', 'INPUT'].includes(element.tagName) ||
+      ['button', 'link'].includes(element.getAttribute('role'));
+    return clickable && /^(accept|agree|continue|confirm)(\\b|\\s)/i.test(text);
+  });
+  if (acceptAfter) acceptAfter.click();
+  return { found: true, accepted: Boolean(acceptAfter), toggled };
+`;
+
+const activationScript = `
+  const mode = arguments[0];
+  const nodes = [];
+  const visit = (root) => {
+    for (const element of root.querySelectorAll('*')) {
+      nodes.push(element);
+      if (element.shadowRoot) visit(element.shadowRoot);
+    }
+  };
+  visit(document);
+  const label = (element) => [
+    element.innerText,
+    element.textContent,
+    element.getAttribute('aria-label'),
+    element.getAttribute('title'),
+    element.getAttribute('value'),
+  ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+
+  if (mode === 'text') {
+    const action = nodes.find((element) => {
+      const text = label(element);
+      const clickable = ['BUTTON', 'A', 'LABEL', 'INPUT'].includes(element.tagName) ||
+        ['button', 'link'].includes(element.getAttribute('role'));
+      return clickable && /^(start vpn|protect me|turn on|connect)(\\b|\\s|$)/i.test(text);
+    });
+    if (action) {
+      action.click();
+      return { clicked: true, control: 'text', label: label(action) };
+    }
+  }
+
+  if (mode === 'custom-switch') {
+    const switches = nodes.filter((element) => element.tagName.toLowerCase() === 'c-switch');
+    const target = switches.at(-1);
+    if (target) {
+      const aria = target.getAttribute('aria-checked');
+      const classes = typeof target.className === 'string' ? target.className : '';
+      const on = aria === 'true' || /(^|[\\s_-])(on|active|checked|enabled)([\\s_-]|$)/i.test(classes);
+      if (!on) target.click();
+      return { clicked: !on, control: 'c-switch', alreadyOn: on, label: label(target) };
+    }
+  }
+
+  if (mode === 'semantic-switch') {
+    const switches = nodes.filter((element) => element.getAttribute('role') === 'switch');
+    const target = switches.at(-1);
+    if (target) {
+      const on = target.getAttribute('aria-checked') === 'true';
+      if (!on) target.click();
+      return { clicked: !on, control: 'role-switch', alreadyOn: on, label: label(target) };
+    }
+  }
+
+  if (mode === 'off') {
+    const off = nodes.find((element) => /^off$/i.test(label(element)));
+    if (off) {
+      off.click();
+      return { clicked: true, control: 'off-label', label: label(off) };
+    }
+  }
+
+  return { clicked: false, control: mode };
+`;
+
+async function getBodyText(driver) {
   try {
-    const url = page.url();
-    return url.startsWith("chrome-extension://") ||
-      url.startsWith("moz-extension://") ||
-      /https?:\/\/([^.]+\.)*browsec\.com\//i.test(url);
+    return await driver.findElement(By.css("body")).getText();
   } catch {
-    return false;
+    return "";
   }
 }
 
-async function savePopupDiagnostics(page, suffix = "activation-failure") {
-  if (!page || page.isClosed()) return;
-
+async function saveDiagnostics(driver, suffix) {
   const stem = `browsec-${browserName}-${suffix}`;
-  const textPath = path.join(diagnosticsDirectory, `${stem}.txt`);
-  const htmlPath = path.join(diagnosticsDirectory, `${stem}.html`);
-  const screenshotPath = path.join(diagnosticsDirectory, `${stem}.png`);
-
-  const text = await bodyText(page);
-  const html = await page.content().catch(() => "");
-  const controls = await page.locator(
-    'button, [role="button"], [role="switch"], [role="checkbox"], a, label, input',
-  ).evaluateAll((nodes) => nodes.slice(0, 100).map((node) => ({
-    tag: node.tagName,
-    text: (node.textContent ?? "").trim(),
-    role: node.getAttribute("role"),
-    ariaLabel: node.getAttribute("aria-label"),
-    ariaChecked: node.getAttribute("aria-checked"),
-    type: node.getAttribute("type"),
-    value: node.getAttribute("value"),
-    className: typeof node.className === "string" ? node.className : "",
-  }))).catch(() => []);
+  let currentUrl = "";
+  let source = "";
+  let snapshot = [];
+  let screenshot = "";
+  try { currentUrl = await driver.getCurrentUrl(); } catch {}
+  try { source = await driver.getPageSource(); } catch {}
+  try { snapshot = await driver.executeScript(deepSnapshotScript); } catch {}
+  try { screenshot = await driver.takeScreenshot(); } catch {}
 
   await Promise.all([
     writeFile(
-      textPath,
-      `URL: ${page.url()}\n\nBODY TEXT:\n${text}\n\nCONTROLS:\n${JSON.stringify(controls, null, 2)}\n`,
+      path.join(diagnosticsDirectory, `${stem}.txt`),
+      `URL: ${currentUrl}\n\nBODY TEXT:\n${await getBodyText(driver)}\n\nDEEP NODES:\n${JSON.stringify(snapshot, null, 2)}\n`,
       "utf8",
     ).catch(() => {}),
-    writeFile(htmlPath, html, "utf8").catch(() => {}),
-    page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {}),
+    writeFile(path.join(diagnosticsDirectory, `${stem}.html`), source, "utf8").catch(() => {}),
+    screenshot
+      ? writeFile(path.join(diagnosticsDirectory, `${stem}.png`), screenshot, "base64").catch(() => {})
+      : Promise.resolve(),
   ]);
 }
 
-async function acceptTerms(page) {
-  if (!isBrowsecPage(page)) return false;
-
-  try {
-    const text = await bodyText(page);
-    const directAccept = page.locator(
-      'input[value="Accept" i], input[value="Agree" i]',
-    ).first();
-    const hasDirectAccept = await directAccept.isVisible().catch(() => false);
-
-    if (
-      !hasDirectAccept &&
-      !/terms(?: of service| and conditions)?|privacy policy|accept|agree|consent/i.test(text)
-    ) {
-      return false;
-    }
-
-    let changed = false;
-    const toggles = page.locator(
-      'input[type="checkbox"], [role="checkbox"]',
-    );
-    const toggleCount = Math.min(await toggles.count(), 10);
-    for (let index = 0; index < toggleCount; index += 1) {
-      if (page.isClosed()) return changed;
-      const toggle = toggles.nth(index);
-      const checked = await toggle.isChecked().catch(async () => {
-        const value = await toggle.getAttribute("aria-checked").catch(() => null);
-        return value === "true";
-      });
-      if (!checked) {
-        await toggle.click({ force: true }).catch(() => {});
-        changed = true;
-      }
-    }
-
-    if (page.isClosed()) return changed;
-
-    if (hasDirectAccept) {
-      await directAccept.click({ force: true }).catch(() => {});
-      return true;
-    }
-
-    const acceptNames = /accept|agree/i;
-    const button = page.getByRole("button", { name: acceptNames }).first();
-    if (await button.isVisible().catch(() => false)) {
-      await button.click({ force: true }).catch(() => {});
-      return true;
-    }
-
-    const fallback = page.locator(
-      'button, [role="button"], input[type="button"], input[type="submit"], a, label',
-    ).filter({ hasText: acceptNames }).first();
-    if (await fallback.isVisible().catch(() => false)) {
-      await fallback.click({ force: true }).catch(() => {});
-      return true;
-    }
-
-    const textFallback = page.getByText(acceptNames).first();
-    if (await textFallback.isVisible().catch(() => false)) {
-      await textFallback.click({ force: true }).catch(() => {});
-      return true;
-    }
-
-    return changed;
-  } catch {
-    return false;
-  }
-}
-
-async function acceptTermsEverywhere(context) {
+async function acceptTermsEverywhere(driver) {
+  const original = await driver.getWindowHandle().catch(() => undefined);
+  const handles = await driver.getAllWindowHandles().catch(() => []);
   let changed = false;
-  for (const page of context.pages()) {
-    if (page.isClosed()) continue;
-    changed = (await acceptTerms(page).catch(() => false)) || changed;
+
+  for (const handle of handles) {
+    try {
+      await driver.switchTo().window(handle);
+      const result = await driver.executeScript(acceptTermsScript);
+      if (result?.found) {
+        changed = true;
+        await sleep(700);
+      }
+    } catch {
+      // A first-run page may close itself after acceptance.
+    }
+  }
+
+  if (original && (await driver.getAllWindowHandles()).includes(original)) {
+    await driver.switchTo().window(original).catch(() => {});
   }
   return changed;
 }
 
-async function openPopup(context) {
-  const popupUrl = browserName === "firefox"
+function popupUrl() {
+  return browserName === "firefox"
     ? `moz-extension://${FIREFOX_EXTENSION_UUID}/popup/popup.html`
     : `chrome-extension://${CHROME_EXTENSION_ID}/popup/popup.html`;
+}
 
+async function openPopup(driver) {
+  const target = popupUrl();
   for (let attempt = 1; attempt <= 30; attempt += 1) {
-    await acceptTermsEverywhere(context);
-    const page = await context.newPage();
+    await acceptTermsEverywhere(driver);
     try {
-      await page.goto(popupUrl, { waitUntil: "domcontentloaded", timeout: 5_000 });
-      if (!page.isClosed() && page.url().startsWith(popupUrl)) {
-        await page.waitForTimeout(750);
-        return page;
+      await driver.get(target);
+      await sleep(700);
+      const current = await driver.getCurrentUrl();
+      const snapshot = await driver.executeScript(deepSnapshotScript);
+      if (current.startsWith(target) && Array.isArray(snapshot) && snapshot.length > 0) {
+        return;
       }
     } catch {
-      // Force-installed extensions may need a few seconds to arrive from the store.
+      // Managed installs can take a few seconds to become available.
     }
-    await page.close().catch(() => {});
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await sleep(1_000);
   }
-
   throw new Error(`${PROVIDER} did not become available in ${browserName}.`);
 }
 
-async function isVpnConnected(page) {
-  const text = await bodyText(page);
-  if (/\bdisconnect\b|turn off|vpn is on/i.test(text)) return true;
-  if (/\bconnected\b/i.test(text) && !/\bnot connected\b|\bdisconnected\b/i.test(text)) {
-    return true;
-  }
-
-  const onControl = page.getByText(/^on$/i).last();
-  return onControl.isVisible().catch(() => false);
-}
-
-async function clickVpnControl(page) {
-  const startNames = /start vpn|protect me|turn on|connect/i;
-
-  const roleButton = page.getByRole("button", { name: startNames }).first();
-  if (await roleButton.isVisible().catch(() => false)) {
-    await roleButton.click({ force: true });
-    return true;
-  }
-
-  const semanticFallback = page.locator(
-    'button, [role="button"], a, input[type="button"], input[type="submit"], label, [class*="button"], [class*="Button"]',
-  ).filter({ hasText: startNames }).first();
-  if (await semanticFallback.isVisible().catch(() => false)) {
-    await semanticFallback.click({ force: true });
-    return true;
-  }
-
-  const textFallback = page.getByText(startNames).first();
-  if (await textFallback.isVisible().catch(() => false)) {
-    await textFallback.click({ force: true });
-    return true;
-  }
-
-  const switchControl = page.getByRole("switch").last();
-  if (await switchControl.isVisible().catch(() => false)) {
-    const checked = await switchControl.getAttribute("aria-checked").catch(() => null);
-    if (checked !== "true") {
-      await switchControl.click({ force: true });
-      return true;
-    }
-  }
-
-  const offControl = page.getByText(/^off$/i).last();
-  if (await offControl.isVisible().catch(() => false)) {
-    await offControl.click({ force: true });
-    return true;
-  }
-
-  return false;
-}
-
-async function startVpn(context) {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    await acceptTermsEverywhere(context);
-    let page;
-
-    try {
-      page = await openPopup(context);
-      await acceptTerms(page);
-      if (page.isClosed()) {
-        await new Promise((resolve) => setTimeout(resolve, 750));
-        continue;
-      }
-
-      await page.waitForTimeout(750);
-      if (await isVpnConnected(page)) return;
-
-      if (await clickVpnControl(page)) {
-        await page.waitForTimeout(1_500);
-        return;
-      }
-
-      if (attempt === 7) {
-        await savePopupDiagnostics(page);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (page && !page.isClosed()) await savePopupDiagnostics(page, "exception");
-      if (!/closed|destroyed|target/i.test(message)) throw error;
-    } finally {
-      if (page && !page.isClosed()) await page.close().catch(() => {});
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-  }
-
-  throw new Error(`Could not find the ${PROVIDER} VPN activation control.`);
-}
-
-async function fetchIpThroughBrowser(context) {
+async function fetchIpThroughBrowser(driver) {
   const endpoints = [
     "https://api.ipify.org?format=json",
     "https://ifconfig.co/ip",
     "https://icanhazip.com/",
   ];
+  const original = await driver.getWindowHandle().catch(() => undefined);
 
   for (const endpoint of endpoints) {
-    const page = await context.newPage();
+    let temporary;
     try {
-      await page.goto(endpoint, { waitUntil: "domcontentloaded", timeout: 20_000 });
-      const ip = extractIp(await bodyText(page));
-      if (ip) return ip;
+      temporary = await driver.switchTo().newWindow("tab");
+      await driver.get(endpoint);
+      await sleep(300);
+      const ip = extractIp(await getBodyText(driver));
+      if (ip) {
+        await driver.close().catch(() => {});
+        if (original) await driver.switchTo().window(original).catch(() => {});
+        return ip;
+      }
     } catch {
       // Try another endpoint through the browser/VPN route.
-    } finally {
-      await page.close().catch(() => {});
     }
+
+    if (temporary) await driver.close().catch(() => {});
+    if (original) await driver.switchTo().window(original).catch(() => {});
   }
 
-  throw new Error("Unable to determine the browser public IP after enabling the VPN.");
+  return undefined;
 }
 
-async function capturePopup(context, suffix) {
-  let page;
-  try {
-    page = await openPopup(context);
-    await savePopupDiagnostics(page, suffix);
-  } catch {
-    // Best-effort diagnostics must not replace the verification error.
-  } finally {
-    if (page && !page.isClosed()) await page.close().catch(() => {});
-  }
-}
-
-const baselineIp = await fetchIpOutsideBrowser();
-console.log(`Runner public IP before ${PROVIDER}: ${baselineIp}`);
-
-const browserType = browserName === "firefox" ? firefox : chromium;
-const launchOptions = {
-  executablePath: executable,
-  headless: false,
-  viewport: null,
-};
-
-if (browserName === "firefox") {
-  launchOptions.firefoxUserPrefs = {
-    "browser.shell.checkDefaultBrowser": false,
-    "extensions.autoDisableScopes": 0,
-    "extensions.enabledScopes": 15,
-    "extensions.startupScanScopes": 15,
-    "extensions.webextensions.uuids": JSON.stringify({
-      [FIREFOX_EXTENSION_ID]: FIREFOX_EXTENSION_UUID,
-    }),
-  };
-} else {
-  launchOptions.ignoreDefaultArgs = [
-    "--disable-extensions",
-    "--disable-background-networking",
-    "--disable-component-update",
-  ];
-  launchOptions.args = [
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--window-size=1600,1000",
-  ];
-}
-
-async function launchContext() {
-  return browserType.launchPersistentContext(profileDirectory, launchOptions);
-}
-
-async function waitForChangedBrowserIp(context, baseline, attempts = 20) {
+async function waitForChangedBrowserIp(driver, baseline, attempts = 12) {
   let latestIp;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    latestIp = await fetchIpThroughBrowser(context).catch(() => undefined);
+    await sleep(1_000);
+    latestIp = await fetchIpThroughBrowser(driver).catch(() => undefined);
     if (latestIp && latestIp !== baseline) return latestIp;
   }
   return latestIp;
 }
 
-let context = await launchContext();
+async function activateAndVerify(driver, baseline) {
+  const modes = ["text", "custom-switch", "semantic-switch", "off"];
+
+  for (let attempt = 0; attempt < modes.length; attempt += 1) {
+    await acceptTermsEverywhere(driver);
+    await openPopup(driver);
+    await acceptTermsEverywhere(driver);
+    await openPopup(driver);
+
+    const mode = modes[attempt];
+    const result = await driver.executeScript(activationScript, mode).catch(() => ({ clicked: false, control: mode }));
+    console.log(`${PROVIDER} activation attempt ${attempt + 1}: ${JSON.stringify(result)}`);
+    await sleep(1_500);
+
+    const changedIp = await waitForChangedBrowserIp(driver, baseline, 5);
+    if (changedIp && changedIp !== baseline) return changedIp;
+
+    await openPopup(driver).catch(() => {});
+    await saveDiagnostics(driver, `attempt-${attempt + 1}-${mode}`).catch(() => {});
+  }
+
+  return undefined;
+}
+
+async function persistFirefoxRuntimeProfile(driver) {
+  const capabilities = await driver.getCapabilities();
+  const runtimeProfile = capabilities.get("moz:profile");
+  if (!runtimeProfile || typeof runtimeProfile !== "string") {
+    throw new Error("Firefox WebDriver did not report its runtime profile path.");
+  }
+
+  const staging = `${profileDirectory}.persisting`;
+  await rm(staging, { recursive: true, force: true });
+  await cp(runtimeProfile, staging, { recursive: true });
+  await rm(profileDirectory, { recursive: true, force: true });
+  await cp(staging, profileDirectory, { recursive: true });
+  await rm(staging, { recursive: true, force: true });
+}
+
+async function buildDriver({ restart = false } = {}) {
+  if (browserName === "chrome") {
+    const options = new chrome.Options()
+      .setChromeBinaryPath(executable)
+      .addArguments(
+        `--user-data-dir=${profileDirectory}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--window-size=1600,1000",
+      );
+    return new Builder()
+      .forBrowser("chrome")
+      .setChromeOptions(options)
+      .build();
+  }
+
+  const options = new firefox.Options()
+    .setBinary(executable)
+    .setPreference("browser.shell.checkDefaultBrowser", false)
+    .setPreference("browser.download.dir", downloadDirectory)
+    .setPreference("browser.download.folderList", 2)
+    .setPreference("browser.download.useDownloadDir", true)
+    .setPreference("extensions.autoDisableScopes", 0)
+    .setPreference("extensions.enabledScopes", 15)
+    .setPreference(
+      "extensions.webextensions.uuids",
+      JSON.stringify({ [FIREFOX_EXTENSION_ID]: FIREFOX_EXTENSION_UUID }),
+    );
+
+  if (restart) options.setProfile(profileDirectory);
+
+  const driver = await new Builder()
+    .forBrowser("firefox")
+    .setFirefoxOptions(options)
+    .build();
+
+  if (!restart) {
+    try {
+      await readFile(firefoxXpiPath);
+    } catch {
+      throw new Error(`Firefox Browsec XPI is missing at ${firefoxXpiPath}.`);
+    }
+    const installedId = await driver.installAddon(firefoxXpiPath, false);
+    if (installedId !== FIREFOX_EXTENSION_ID) {
+      throw new Error(`Unexpected Firefox Browsec add-on ID: ${installedId}`);
+    }
+    await sleep(1_500);
+  }
+
+  return driver;
+}
+
+const baselineIp = await fetchIpOutsideBrowser();
+console.log(`Runner public IP before ${PROVIDER}: ${baselineIp}`);
+
+let driver = await buildDriver();
 let vpnIp;
 try {
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    await acceptTermsEverywhere(context);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await acceptTermsEverywhere(driver);
+    await sleep(400);
   }
 
-  await startVpn(context);
-  vpnIp = await waitForChangedBrowserIp(context, baselineIp);
-
-  if (!vpnIp) {
-    await capturePopup(context, "ip-unavailable");
-    throw new Error(`Unable to verify ${PROVIDER} through an external IP check.`);
-  }
-  if (vpnIp === baselineIp) {
-    await capturePopup(context, "ip-unchanged");
+  vpnIp = await activateAndVerify(driver, baselineIp);
+  if (!vpnIp || vpnIp === baselineIp) {
+    await openPopup(driver).catch(() => {});
+    await saveDiagnostics(driver, "ip-unchanged").catch(() => {});
     throw new Error(`${PROVIDER} did not change the browser public IP.`);
   }
   console.log(`${PROVIDER} changed the browser public IP to ${vpnIp}.`);
-} finally {
-  await context.close();
-}
 
-context = await launchContext();
-let restartIp;
-try {
-  restartIp = await waitForChangedBrowserIp(context, baselineIp);
-  if (!restartIp || restartIp === baselineIp) {
-    await capturePopup(context, "restart-ip-unchanged");
-    throw new Error(`${PROVIDER} did not remain active after a browser restart.`);
+  if (browserName === "firefox") {
+    await persistFirefoxRuntimeProfile(driver);
   }
 } finally {
-  await context.close();
+  await driver.quit().catch(() => {});
+}
+
+driver = await buildDriver({ restart: true });
+let restartIp;
+try {
+  restartIp = await waitForChangedBrowserIp(driver, baselineIp, 12);
+  if (!restartIp || restartIp === baselineIp) {
+    await openPopup(driver).catch(() => {});
+    await saveDiagnostics(driver, "restart-ip-unchanged").catch(() => {});
+    throw new Error(`${PROVIDER} did not remain active after a browser restart.`);
+  }
+
+  if (browserName === "firefox") {
+    await persistFirefoxRuntimeProfile(driver);
+  }
+} finally {
+  await driver.quit().catch(() => {});
 }
 
 await writeFile(
