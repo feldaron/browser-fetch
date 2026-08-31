@@ -42,6 +42,9 @@ jobs:
     timeout-minutes: 330
     env:
       DISPLAY: ":99"
+      PRIVATE_BROWSER_PROFILE_ROOT: /tmp/private-browser-profile
+      PRIVATE_BROWSER_DOWNLOAD_DIRECTORY: /tmp/private-browser/downloads
+      PRIVATE_BROWSER_VPN_STATUS: /tmp/private-browser/vpn-status.json
     steps:
       - uses: actions/checkout@v5
 
@@ -71,22 +74,10 @@ jobs:
             duration="$(jq -er 'fromjson | .durationMinutes // 60 | tostring' <<<"$body")"
           fi
 
-          [[ "$start_url" =~ ^https?://[^[:space:]]+$ ]] || {
-            echo "startUrl must be a single http or https URL" >&2
-            exit 1
-          }
-          [[ "$browser" == "firefox" || "$browser" == "chrome" ]] || {
-            echo "browser must be firefox or chrome" >&2
-            exit 1
-          }
-          [[ "$duration" =~ ^[0-9]+$ ]] || {
-            echo "durationMinutes must be an integer" >&2
-            exit 1
-          }
-          (( duration >= 15 && duration <= 300 )) || {
-            echo "durationMinutes must be between 15 and 300" >&2
-            exit 1
-          }
+          [[ "$start_url" =~ ^https?://[^[:space:]]+$ ]] || { echo "startUrl must be a single http or https URL" >&2; exit 1; }
+          [[ "$browser" == "firefox" || "$browser" == "chrome" ]] || { echo "browser must be firefox or chrome" >&2; exit 1; }
+          [[ "$duration" =~ ^[0-9]+$ ]] || { echo "durationMinutes must be an integer" >&2; exit 1; }
+          (( duration >= 15 && duration <= 300 )) || { echo "durationMinutes must be between 15 and 300" >&2; exit 1; }
 
           echo "start_url=$start_url" >> "$GITHUB_OUTPUT"
           echo "browser=$browser" >> "$GITHUB_OUTPUT"
@@ -97,29 +88,37 @@ jobs:
         env:
           CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
         run: |
-          test -n "$CLOUDFLARE_TUNNEL_TOKEN" || {
-            echo "Add CLOUDFLARE_TUNNEL_TOKEN as a repository Actions secret." >&2
-            exit 1
-          }
+          test -n "$CLOUDFLARE_TUNNEL_TOKEN" || { echo "Add CLOUDFLARE_TUNNEL_TOKEN as a repository Actions secret." >&2; exit 1; }
 
       - name: Install JavaScript and desktop dependencies
         run: |
           npm install --ignore-scripts --no-audit --no-fund
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xvfb openbox x11vnc novnc websockify
+            xvfb openbox x11vnc novnc websockify unzip
 
-      - name: Install selected browser
+      - name: Resolve selected browser and WebDriver
         id: browser
         shell: bash
         env:
           PRIVATE_BROWSER: ${{ steps.settings.outputs.browser }}
         run: |
           set -euo pipefail
+          ensure_driver() {
+            local command_name="$1"
+            local search_root="$2"
+            if command -v "$command_name" > /dev/null 2>&1; then return 0; fi
+            local candidate
+            candidate="$(find "$search_root" -type f -name "$command_name" -perm -u+x -print -quit 2>/dev/null || true)"
+            test -n "$candidate" || { echo "Unable to locate $command_name under $search_root" >&2; exit 1; }
+            sudo ln -sf "$candidate" "/usr/local/bin/$command_name"
+          }
+
           if [[ "$PRIVATE_BROWSER" == "firefox" ]]; then
-            npx playwright install --with-deps firefox
-            executable="$(node --input-type=module -e \
-              'import { firefox } from "playwright"; process.stdout.write(firefox.executablePath())')"
+            firefox --version
+            ensure_driver geckodriver "${GECKOWEBDRIVER:-/usr/local/share/gecko_driver}"
+            geckodriver --version
+            executable="$(command -v firefox)"
           else
             google-chrome --version
             executable="$(command -v google-chrome)"
@@ -127,15 +126,76 @@ jobs:
           test -x "$executable"
           echo "executable=$executable" >> "$GITHUB_OUTPUT"
 
+      - name: Stage Browsec VPN extension
+        shell: bash
+        env:
+          PRIVATE_BROWSER: ${{ steps.settings.outputs.browser }}
+        run: |
+          set -euo pipefail
+          if [[ "$PRIVATE_BROWSER" == "firefox" ]]; then
+            extension_dir="$PRIVATE_BROWSER_PROFILE_ROOT/firefox/extensions"
+            mkdir -p "$extension_dir"
+            addon_json="$(curl --fail --location --silent --show-error https://addons.mozilla.org/api/v5/addons/addon/browsec/)"
+            extension_id="$(jq -er '.guid | strings | select(length > 0)' <<<"$addon_json")"
+            xpi_url="$(jq -er '.current_version.file.url | strings | select(length > 0)' <<<"$addon_json")"
+            [[ "$extension_id" =~ ^[A-Za-z0-9._@{}-]+$ ]] || { echo "AMO returned an invalid Browsec Firefox extension ID" >&2; exit 1; }
+            curl --fail --location --silent --show-error --output "$extension_dir/$extension_id.xpi" "$xpi_url"
+            test -s "$extension_dir/$extension_id.xpi"
+            echo "BROWSEC_FIREFOX_EXTENSION_ID=$extension_id" >> "$GITHUB_ENV"
+          else
+            sudo mkdir -p /etc/opt/chrome/policies/managed
+            sudo tee /etc/opt/chrome/policies/managed/private-browser-vpn.json > /dev/null <<'JSON'
+          {
+            "ExtensionSettings": {
+              "omghfjlpggmjjaagoclmmobgdodcjboh": {
+                "installation_mode": "force_installed",
+                "update_url": "https://clients2.google.com/service/update2/crx",
+                "toolbar_pin": "force_pinned"
+              }
+            }
+          }
+          JSON
+          fi
+
       - name: Install cloudflared
         run: |
-          curl --fail --location --silent --show-error \
-            --output /tmp/cloudflared.deb \
+          curl --fail --location --silent --show-error --output /tmp/cloudflared.deb \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i /tmp/cloudflared.deb
           cloudflared --version
 
-      - name: Start virtual desktop and browser
+      - name: Start virtual desktop services
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/private-browser /tmp/novnc "$PRIVATE_BROWSER_DOWNLOAD_DIRECTORY"
+          cp -R /usr/share/novnc/. /tmp/novnc/
+          cat > /tmp/novnc/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LaptopValue private browser</title></head><body><p>Opening the private browser…</p><script>location.replace('/vnc.html?autoconnect=1&resize=remote&path=websockify');</script></body></html>
+          HTML
+          Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp -ac > /tmp/private-browser/xvfb.log 2>&1 &
+          sleep 2
+          openbox-session > /tmp/private-browser/openbox.log 2>&1 &
+          x11vnc -display :99 -localhost -forever -shared -nopw -rfbport 5900 -o /tmp/private-browser/x11vnc.log &
+          websockify --web=/tmp/novnc 6080 localhost:5900 > /tmp/private-browser/websockify.log 2>&1 &
+          for attempt in {1..30}; do curl --fail --silent http://127.0.0.1:6080/ > /dev/null && exit 0; sleep 1; done
+          echo "noVNC did not become ready" >&2
+          cat /tmp/private-browser/websockify.log >&2 || true
+          exit 1
+
+      - name: Install, activate and verify Browsec VPN
+        shell: bash
+        env:
+          PRIVATE_BROWSER: ${{ steps.settings.outputs.browser }}
+          PRIVATE_BROWSER_EXECUTABLE: ${{ steps.browser.outputs.executable }}
+        run: |
+          set -o pipefail
+          node scripts/prepare-private-vpn.mjs 2>&1 | tee /tmp/private-browser/vpn-setup.log
+          test -s "$PRIVATE_BROWSER_VPN_STATUS"
+          jq -e '.provider == "Browsec" and .verified == true and .restartVerified == true and (.baselineIp != .restartIp)' "$PRIVATE_BROWSER_VPN_STATUS" > /dev/null
+
+      - name: Start private browser
         shell: bash
         env:
           START_URL: ${{ steps.settings.outputs.start_url }}
@@ -143,62 +203,22 @@ jobs:
           PRIVATE_BROWSER_EXECUTABLE: ${{ steps.browser.outputs.executable }}
         run: |
           set -euo pipefail
-          mkdir -p /tmp/private-browser /tmp/novnc
-          cp -R /usr/share/novnc/. /tmp/novnc/
-          cat > /tmp/novnc/index.html <<'HTML'
-          <!doctype html>
-          <html lang="en">
-            <head>
-              <meta charset="utf-8">
-              <meta name="viewport" content="width=device-width,initial-scale=1">
-              <title>LaptopValue private browser</title>
-            </head>
-            <body>
-              <p>Opening the private browser…</p>
-              <script>
-                location.replace('/vnc.html?autoconnect=1&resize=remote&path=websockify');
-              </script>
-            </body>
-          </html>
-          HTML
-
-          Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp -ac \
-            > /tmp/private-browser/xvfb.log 2>&1 &
-          sleep 2
-          openbox-session > /tmp/private-browser/openbox.log 2>&1 &
-          x11vnc -display :99 -localhost -forever -shared -nopw -rfbport 5900 \
-            -o /tmp/private-browser/x11vnc.log &
-          websockify --web=/tmp/novnc 6080 localhost:5900 \
-            > /tmp/private-browser/websockify.log 2>&1 &
-          node scripts/launch-private-browser.mjs "$START_URL" \
-            > /tmp/private-browser/browser.log 2>&1 &
-
-          for attempt in {1..30}; do
-            curl --fail --silent http://127.0.0.1:6080/ > /dev/null && exit 0
-            sleep 1
-          done
-          echo "noVNC did not become ready" >&2
-          cat /tmp/private-browser/websockify.log >&2 || true
-          cat /tmp/private-browser/browser.log >&2 || true
-          exit 1
+          node scripts/launch-private-browser.mjs "$START_URL" > /tmp/private-browser/browser.log 2>&1 &
+          echo $! > /tmp/private-browser/browser-launcher.pid
+          sleep 3
+          kill -0 "$(cat /tmp/private-browser/browser-launcher.pid)" || { cat /tmp/private-browser/browser.log >&2 || true; exit 1; }
 
       - name: Connect privatebrowser.laptopvalue.co.uk
         env:
           CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
         run: |
-          cloudflared tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN" \
-            > /tmp/private-browser/cloudflared.log 2>&1 &
+          cloudflared tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN" > /tmp/private-browser/cloudflared.log 2>&1 &
           echo $! > /tmp/private-browser/cloudflared.pid
-
           for attempt in {1..30}; do
-            kill -0 "$(cat /tmp/private-browser/cloudflared.pid)" || {
-              cat /tmp/private-browser/cloudflared.log >&2
-              exit 1
-            }
+            kill -0 "$(cat /tmp/private-browser/cloudflared.pid)" || { cat /tmp/private-browser/cloudflared.log >&2; exit 1; }
             grep -q "Registered tunnel connection" /tmp/private-browser/cloudflared.log && exit 0
             sleep 1
           done
-
           echo "cloudflared remained running but did not confirm a tunnel connection" >&2
           cat /tmp/private-browser/cloudflared.log >&2
           exit 1
@@ -211,8 +231,7 @@ jobs:
           DURATION: ${{ steps.settings.outputs.duration }}
           PRIVATE_BROWSER: ${{ steps.settings.outputs.browser }}
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" \
-            -f body="The private ${PRIVATE_BROWSER} session is available at https://privatebrowser.laptopvalue.co.uk for up to ${DURATION} minutes. Cloudflare Access authentication is required."
+          gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" -f body="The private ${PRIVATE_BROWSER} session is available at https://privatebrowser.laptopvalue.co.uk for up to ${DURATION} minutes. Browsec VPN was installed, activated and IP-verified before the session was exposed. Cloudflare Access authentication is required."
 
       - name: Keep browser session available
         env:
@@ -225,10 +244,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ steps.settings.outputs.issue_number }}
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" \
-            -f body="The private browser session has ended."
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER" \
-            -f state=closed
+          gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" -f body="The private browser session has ended."
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER" -f state=closed
 
       - name: Upload diagnostic logs
         if: always()

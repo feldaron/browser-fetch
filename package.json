@@ -8,12 +8,13 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "node --check src/*.mjs && node --check tests/*.mjs",
+    "check": "node --check src/*.mjs && node --check scripts/*.mjs && node --check tests/*.mjs",
     "test": "node --test tests/*.test.mjs",
     "browser-fetch": "node src/cli.mjs",
     "browser-fetch:issue": "node src/issue-request.mjs"
   },
   "dependencies": {
-    "playwright": "1.55.0"
+    "playwright": "1.55.0",
+    "selenium-webdriver": "4.47.0"
   }
 }

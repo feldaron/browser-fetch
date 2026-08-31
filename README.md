@@ -121,15 +121,29 @@ Currys item `10296598` is the Acer Swift 16 AI, MPN `NX.JU1EK.001`, EAN `4711474
 
 Open **Actions → Private browser session → Run workflow** to start a temporary
 interactive desktop at `privatebrowser.laptopvalue.co.uk`. Firefox is the default;
-Chrome remains available as a workflow choice. The selected browser is launched
-directly as a normal desktop process rather than through Playwright, so the manual
-session does not show Chrome's test-software banner or inherit Playwright's
-automation launch flags.
+Chrome remains available as a workflow choice.
+
+Before the remote desktop is exposed, the workflow force-installs the official
+**Browsec VPN** browser extension into the temporary profile, accepts its first-run
+setup, turns the free VPN on, and verifies that the browser's public IP has changed.
+It then restarts the browser once and verifies that the changed IP persists. If any
+of those checks fail, the Cloudflare tunnel is not opened and the session fails
+closed. Browsec was selected here because its Firefox and Chrome extensions can be
+used without a VPN account or additional repository secrets.
+
+The verification phase uses Playwright only to prepare the temporary browser
+profile. After verification, that browser is closed and the selected browser is
+launched directly as a normal desktop process with the same prepared profile. The
+interactive session therefore does not inherit Playwright's automation launch
+flags. The VPN is intended to provide browser-network privacy; it does not change
+the repository rule that CAPTCHA, access-control or retailer anti-bot blocks are
+not bypassed.
 
 Owner-authored `[browser]` issues can select the browser with a JSON `browser`
 property (`"firefox"` or `"chrome"`). Firefox is used when the property is omitted.
 
 Files downloaded in either browser are saved under
-`/tmp/private-browser/downloads`. The workflow includes that directory in its
-`private-browser-logs-<run-id>` artifact, so downloads remain retrievable after
-the temporary browser session ends.
+`/tmp/private-browser/downloads`. VPN setup evidence is written to
+`/tmp/private-browser/vpn-status.json`. The workflow includes both under its
+`private-browser-logs-<run-id>` artifact, so downloads and the VPN verification
+record remain retrievable after the temporary browser session ends.

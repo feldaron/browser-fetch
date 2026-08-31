@@ -1,6 +1,10 @@
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+
+const FIREFOX_EXTENSION_ID = process.env.BROWSEC_FIREFOX_EXTENSION_ID ??
+  "browsec@browsec.com";
+const CHROME_EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh";
 
 const rawUrl = process.argv[2] ?? "https://www.currys.co.uk/";
 const startUrl = new URL(rawUrl);
@@ -21,11 +25,24 @@ const profileRoot = process.env.PRIVATE_BROWSER_PROFILE_ROOT ??
 const profileDirectory = path.join(profileRoot, browserName);
 const downloadDirectory = process.env.PRIVATE_BROWSER_DOWNLOAD_DIRECTORY ??
   "/tmp/private-browser/downloads";
+const vpnStatusPath = process.env.PRIVATE_BROWSER_VPN_STATUS ??
+  "/tmp/private-browser/vpn-status.json";
 
 await Promise.all([
   mkdir(profileDirectory, { recursive: true }),
   mkdir(downloadDirectory, { recursive: true }),
 ]);
+
+let vpnStatus;
+try {
+  vpnStatus = JSON.parse(await readFile(vpnStatusPath, "utf8"));
+} catch (error) {
+  throw new Error(`Verified VPN status is unavailable at ${vpnStatusPath}: ${error.message}`);
+}
+if (vpnStatus?.provider !== "Browsec" || vpnStatus?.browser !== browserName ||
+    vpnStatus?.verified !== true || vpnStatus?.restartVerified !== true) {
+  throw new Error(`Refusing to launch ${browserName}: Browsec VPN was not restart-verified.`);
+}
 
 if (browserName === "firefox") {
   const downloadPreference = JSON.stringify(downloadDirectory);
@@ -36,23 +53,46 @@ if (browserName === "firefox") {
       'user_pref("browser.download.folderList", 2);',
       'user_pref("browser.download.useDownloadDir", true);',
       'user_pref("browser.download.alwaysOpenPanel", false);',
+      'user_pref("extensions.autoDisableScopes", 0);',
+      'user_pref("extensions.enabledScopes", 15);',
+      // Firefox owns extensions.webextensions.uuids. The VPN provisioning step
+      // persists Firefox's generated Browsec UUID in prefs.js; do not override it
+      // here or the installed add-on can lose its moz-extension origin on restart.
+      `// Browsec add-on ID: ${FIREFOX_EXTENSION_ID}`,
       "",
     ].join("\n"),
     "utf8",
   );
 } else {
+  if (vpnStatus?.extensionId !== CHROME_EXTENSION_ID) {
+    throw new Error("Refusing to launch Chrome: the verified extension is not Browsec from the Chrome Web Store.");
+  }
+
   const defaultProfileDirectory = path.join(profileDirectory, "Default");
+  const preferencesPath = path.join(defaultProfileDirectory, "Preferences");
   await mkdir(defaultProfileDirectory, { recursive: true });
+
+  let preferences = {};
+  try {
+    preferences = JSON.parse(await readFile(preferencesPath, "utf8"));
+  } catch {
+    // A fresh Chrome profile has no Preferences file yet.
+  }
+
+  preferences.download = {
+    ...(preferences.download ?? {}),
+    default_directory: downloadDirectory,
+    directory_upgrade: true,
+    prompt_for_download: false,
+  };
+  preferences.safebrowsing = {
+    ...(preferences.safebrowsing ?? {}),
+    enabled: true,
+  };
+
   await writeFile(
-    path.join(defaultProfileDirectory, "Preferences"),
-    `${JSON.stringify({
-      download: {
-        default_directory: downloadDirectory,
-        directory_upgrade: true,
-        prompt_for_download: false,
-      },
-      safebrowsing: { enabled: true },
-    })}\n`,
+    preferencesPath,
+    `${JSON.stringify(preferences)}\n`,
     "utf8",
   );
 }
@@ -73,7 +113,6 @@ const args = browserName === "firefox"
       `--user-data-dir=${profileDirectory}`,
       "--no-first-run",
       "--no-default-browser-check",
-      "--disable-background-networking",
       "--start-maximized",
       "--window-size=1600,1000",
       startUrl.toString(),
@@ -89,7 +128,7 @@ browser.on("error", (error) => {
   process.exitCode = 1;
 });
 
-console.log(`Private ${browserName} opened at ${startUrl.toString()}`);
+console.log(`Private ${browserName} opened at ${startUrl.toString()} with restart-verified Browsec VPN.`);
 
 let closing = false;
 function close(signal) {

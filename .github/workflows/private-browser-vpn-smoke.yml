@@ -1,0 +1,223 @@
+name: Smoke test private browser VPN
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/private-browser.yml
+      - .github/workflows/private-browser-vpn-smoke.yml
+      - scripts/prepare-private-vpn.mjs
+      - scripts/prepare-private-vpn-chrome.mjs
+      - scripts/prepare-private-vpn-runtime.mjs
+      - scripts/launch-private-browser.mjs
+      - package.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-browser-vpn-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vpn-smoke:
+    name: ${{ matrix.browser }} VPN smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        browser:
+          - firefox
+          - chrome
+    env:
+      DISPLAY: ":99"
+      PRIVATE_BROWSER: ${{ matrix.browser }}
+      PRIVATE_BROWSER_PROFILE_ROOT: /tmp/private-browser-profile
+      PRIVATE_BROWSER_DOWNLOAD_DIRECTORY: /tmp/private-browser/downloads
+      PRIVATE_BROWSER_VPN_STATUS: /tmp/private-browser/vpn-status.json
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install JavaScript dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Resolve browser, WebDriver and virtual display
+        id: browser
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xvfb unzip
+
+          ensure_driver() {
+            local command_name="$1"
+            local search_root="$2"
+            if command -v "$command_name" > /dev/null 2>&1; then
+              return 0
+            fi
+            local candidate
+            candidate="$(find "$search_root" -type f -name "$command_name" -perm -u+x -print -quit 2>/dev/null || true)"
+            test -n "$candidate" || {
+              echo "Unable to locate $command_name under $search_root" >&2
+              exit 1
+            }
+            sudo ln -sf "$candidate" "/usr/local/bin/$command_name"
+          }
+
+          if [[ "$PRIVATE_BROWSER" == "firefox" ]]; then
+            firefox --version
+            ensure_driver geckodriver "${GECKOWEBDRIVER:-/usr/local/share/gecko_driver}"
+            geckodriver --version
+            executable="$(command -v firefox)"
+          else
+            google-chrome --version
+            executable="$(command -v google-chrome)"
+          fi
+          test -x "$executable"
+          echo "executable=$executable" >> "$GITHUB_OUTPUT"
+
+      - name: Stage Browsec extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$PRIVATE_BROWSER" == "firefox" ]]; then
+            extension_dir="$PRIVATE_BROWSER_PROFILE_ROOT/firefox/extensions"
+            mkdir -p "$extension_dir"
+
+            addon_json="$(curl --fail --location --silent --show-error \
+              https://addons.mozilla.org/api/v5/addons/addon/browsec/)"
+            extension_id="$(jq -er '.guid | strings | select(length > 0)' <<<"$addon_json")"
+            xpi_url="$(jq -er '.current_version.file.url | strings | select(length > 0)' <<<"$addon_json")"
+            [[ "$extension_id" =~ ^[A-Za-z0-9._@{}-]+$ ]] || {
+              echo "AMO returned an invalid Browsec Firefox extension ID" >&2
+              exit 1
+            }
+
+            curl --fail --location --silent --show-error \
+              --output "$extension_dir/$extension_id.xpi" \
+              "$xpi_url"
+            test -s "$extension_dir/$extension_id.xpi"
+            echo "BROWSEC_FIREFOX_EXTENSION_ID=$extension_id" >> "$GITHUB_ENV"
+          else
+            sudo mkdir -p /etc/opt/chrome/policies/managed
+            sudo tee /etc/opt/chrome/policies/managed/private-browser-vpn.json > /dev/null <<'JSON'
+          {
+            "ExtensionSettings": {
+              "omghfjlpggmjjaagoclmmobgdodcjboh": {
+                "installation_mode": "force_installed",
+                "update_url": "https://clients2.google.com/service/update2/crx",
+                "toolbar_pin": "force_pinned"
+              }
+            }
+          }
+          JSON
+          fi
+
+      - name: Start virtual display
+        run: |
+          mkdir -p /tmp/private-browser "$PRIVATE_BROWSER_DOWNLOAD_DIRECTORY"
+          Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp -ac \
+            > /tmp/private-browser/xvfb.log 2>&1 &
+          sleep 2
+
+      - name: Activate and verify Browsec
+        timeout-minutes: 3
+        env:
+          PRIVATE_BROWSER_EXECUTABLE: ${{ steps.browser.outputs.executable }}
+        run: |
+          set -o pipefail
+          node scripts/prepare-private-vpn.mjs 2>&1 | tee /tmp/private-browser/vpn-setup.log
+          jq -e '.provider == "Browsec" and .verified == true and .restartVerified == true and (.baselineIp != .restartIp)' \
+            "$PRIVATE_BROWSER_VPN_STATUS" > /dev/null
+
+      - name: Inspect installed Browsec package
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee /tmp/private-browser/browsec-package-diagnostics.txt
+          import json, pathlib, re, zipfile
+
+          browser = __import__('os').environ.get('PRIVATE_BROWSER')
+          profile = pathlib.Path(__import__('os').environ['PRIVATE_BROWSER_PROFILE_ROOT'])
+          work = pathlib.Path('/tmp/private-browser/browsec-inspect')
+          work.mkdir(parents=True, exist_ok=True)
+
+          if browser == 'firefox':
+              xpies = list((profile / 'firefox' / 'extensions').glob('*.xpi'))
+              if not xpies:
+                  print('NO_FIREFOX_XPI')
+                  raise SystemExit
+              root = work / 'firefox'
+              root.mkdir(parents=True, exist_ok=True)
+              with zipfile.ZipFile(xpies[0]) as z:
+                  z.extractall(root)
+          else:
+              install_root = profile / 'chrome' / 'Default' / 'Extensions' / 'omghfjlpggmjjaagoclmmobgdodcjboh'
+              versions = sorted([p for p in install_root.glob('*') if p.is_dir()], reverse=True)
+              if not versions:
+                  print('NO_CHROME_EXTENSION_DIRECTORY')
+                  raise SystemExit
+              root = versions[0]
+
+          manifest = root / 'manifest.json'
+          if manifest.exists():
+              data = json.loads(manifest.read_text(errors='replace'))
+              print('MANIFEST', json.dumps({
+                  'version': data.get('version'),
+                  'manifest_version': data.get('manifest_version'),
+                  'background': data.get('background'),
+                  'action': data.get('action') or data.get('browser_action'),
+                  'permissions': data.get('permissions'),
+              }, sort_keys=True))
+
+          terms = [
+              'userPac', 'proxy.settings', 'setProxy', 'start vpn', 'Start VPN',
+              'country', 'broken', 'filters', 'pacScript', 'proxyType',
+              'connectionState', 'connected', 'mode: "proxy"', "mode:'proxy'",
+          ]
+          seen = 0
+          for file in root.rglob('*'):
+              if not file.is_file() or file.suffix.lower() not in {'.js', '.mjs', '.json', '.html'}:
+                  continue
+              try:
+                  text = file.read_text(errors='replace')
+              except Exception:
+                  continue
+              low = text.lower()
+              hits = []
+              for term in terms:
+                  start = 0
+                  needle = term.lower()
+                  while len(hits) < 6:
+                      idx = low.find(needle, start)
+                      if idx < 0:
+                          break
+                      hits.append((idx, term))
+                      start = idx + len(needle)
+              if not hits:
+                  continue
+              rel = file.relative_to(root)
+              for idx, term in sorted(hits)[:6]:
+                  left = max(0, idx - 220)
+                  right = min(len(text), idx + len(term) + 380)
+                  snippet = re.sub(r'\s+', ' ', text[left:right])
+                  print(f'HIT {rel} TERM={term!r} :: {snippet}')
+                  seen += 1
+                  if seen >= 80:
+                      raise SystemExit
+          PY
+
+      - name: Upload VPN smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-browser-vpn-${{ matrix.browser }}-${{ github.run_id }}
+          path: /tmp/private-browser/
+          if-no-files-found: warn
+          retention-days: 3
