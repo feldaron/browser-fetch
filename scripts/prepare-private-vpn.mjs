@@ -1,0 +1,278 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { chromium, firefox } from "playwright";
+
+const PROVIDER = "Browsec";
+const CHROME_EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh";
+const FIREFOX_EXTENSION_ID = "browsec@browsec.com";
+const FIREFOX_EXTENSION_UUID = "8f9b7b1a-6d40-4f5c-a7db-5e8f86f24691";
+
+const browserName = (process.env.PRIVATE_BROWSER ?? "firefox").toLowerCase();
+if (!["chrome", "firefox"].includes(browserName)) {
+  throw new Error(`Unsupported private browser: ${browserName}`);
+}
+
+const executable = process.env.PRIVATE_BROWSER_EXECUTABLE ??
+  (browserName === "firefox" ? "firefox" : "google-chrome");
+const profileRoot = process.env.PRIVATE_BROWSER_PROFILE_ROOT ??
+  "/tmp/private-browser-profile";
+const profileDirectory = path.join(profileRoot, browserName);
+const statusPath = process.env.PRIVATE_BROWSER_VPN_STATUS ??
+  "/tmp/private-browser/vpn-status.json";
+
+await mkdir(profileDirectory, { recursive: true });
+await mkdir(path.dirname(statusPath), { recursive: true });
+
+async function fetchIpOutsideBrowser() {
+  const endpoints = [
+    "https://api.ipify.org?format=json",
+    "https://ifconfig.co/ip",
+    "https://icanhazip.com/",
+  ];
+
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        headers: { "user-agent": "LaptopValue-private-browser-vpn-check/1.0" },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) continue;
+      const text = (await response.text()).trim();
+      const match = text.match(/(?:\d{1,3}\.){3}\d{1,3}|[0-9a-f:]{2,}/i);
+      if (match) return match[0];
+    } catch {
+      // Try the next independent IP service.
+    }
+  }
+
+  throw new Error("Unable to determine the runner public IP before enabling the VPN.");
+}
+
+async function bodyText(page) {
+  return page.locator("body").innerText({ timeout: 3_000 }).catch(() => "");
+}
+
+function isBrowsecPage(page) {
+  const url = page.url();
+  return url.startsWith("chrome-extension://") ||
+    url.startsWith("moz-extension://") ||
+    /https?:\/\/([^.]+\.)*browsec\.com\//i.test(url);
+}
+
+async function acceptTerms(page) {
+  if (!isBrowsecPage(page)) return false;
+  const text = await bodyText(page);
+  if (!/terms|conditions|privacy|accept|agree|consent/i.test(text)) return false;
+
+  let changed = false;
+  const toggles = page.locator(
+    'input[type="checkbox"], [role="checkbox"], [role="switch"]',
+  );
+  const toggleCount = Math.min(await toggles.count(), 10);
+  for (let index = 0; index < toggleCount; index += 1) {
+    const toggle = toggles.nth(index);
+    const checked = await toggle.isChecked().catch(async () => {
+      const value = await toggle.getAttribute("aria-checked");
+      return value === "true";
+    });
+    if (!checked) {
+      await toggle.click({ force: true }).catch(() => {});
+      changed = true;
+    }
+  }
+
+  const acceptNames = /accept|agree|continue|confirm/i;
+  const button = page.getByRole("button", { name: acceptNames }).first();
+  if (await button.count()) {
+    await button.click({ force: true }).catch(() => {});
+    changed = true;
+  } else {
+    const fallback = page.locator(
+      'button, [role="button"], input[type="button"], input[type="submit"]',
+    ).filter({ hasText: acceptNames }).first();
+    if (await fallback.count()) {
+      await fallback.click({ force: true }).catch(() => {});
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+async function acceptTermsEverywhere(context) {
+  let changed = false;
+  for (const page of context.pages()) {
+    changed = (await acceptTerms(page)) || changed;
+  }
+  return changed;
+}
+
+async function openPopup(context) {
+  const popupUrl = browserName === "firefox"
+    ? `moz-extension://${FIREFOX_EXTENSION_UUID}/popup/popup.html`
+    : `chrome-extension://${CHROME_EXTENSION_ID}/popup/popup.html`;
+
+  for (let attempt = 1; attempt <= 30; attempt += 1) {
+    await acceptTermsEverywhere(context);
+    const page = await context.newPage();
+    try {
+      await page.goto(popupUrl, { waitUntil: "domcontentloaded", timeout: 5_000 });
+      if (page.url().startsWith(popupUrl)) return { page, popupUrl };
+    } catch {
+      // Force-installed extensions may need a few seconds to arrive from the store.
+    }
+    await page.close().catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+
+  throw new Error(`${PROVIDER} did not become available in ${browserName}.`);
+}
+
+async function startVpn(context, page) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await acceptTermsEverywhere(context);
+    await acceptTerms(page);
+
+    const startNames = /start vpn|protect me|turn on|connect/i;
+    const button = page.getByRole("button", { name: startNames }).first();
+    if (await button.count()) {
+      await button.click({ force: true });
+      return;
+    }
+
+    const fallback = page.locator(
+      'button, [role="button"], a, input[type="button"], input[type="submit"]',
+    ).filter({ hasText: startNames }).first();
+    if (await fallback.count()) {
+      await fallback.click({ force: true });
+      return;
+    }
+
+    const text = await bodyText(page);
+    if (/connected|protected|vpn is on|turn off|disconnect/i.test(text)) return;
+    await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+
+  throw new Error(`Could not find the ${PROVIDER} VPN activation control.`);
+}
+
+async function fetchIpThroughBrowser(context) {
+  const endpoints = [
+    "https://api.ipify.org?format=json",
+    "https://ifconfig.co/ip",
+    "https://icanhazip.com/",
+  ];
+
+  for (const endpoint of endpoints) {
+    const page = await context.newPage();
+    try {
+      await page.goto(endpoint, { waitUntil: "domcontentloaded", timeout: 20_000 });
+      const text = (await bodyText(page)).trim();
+      const match = text.match(/(?:\d{1,3}\.){3}\d{1,3}|[0-9a-f:]{2,}/i);
+      if (match) return match[0];
+    } catch {
+      // Try another endpoint through the browser/VPN route.
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  throw new Error("Unable to determine the browser public IP after enabling the VPN.");
+}
+
+const baselineIp = await fetchIpOutsideBrowser();
+const browserType = browserName === "firefox" ? firefox : chromium;
+const launchOptions = {
+  executablePath: executable,
+  headless: false,
+  viewport: null,
+};
+
+if (browserName === "firefox") {
+  launchOptions.firefoxUserPrefs = {
+    "browser.shell.checkDefaultBrowser": false,
+    "extensions.autoDisableScopes": 0,
+    "extensions.enabledScopes": 15,
+    "extensions.webextensions.uuids": JSON.stringify({
+      [FIREFOX_EXTENSION_ID]: FIREFOX_EXTENSION_UUID,
+    }),
+  };
+} else {
+  launchOptions.ignoreDefaultArgs = [
+    "--disable-extensions",
+    "--disable-background-networking",
+  ];
+  launchOptions.args = [
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-size=1600,1000",
+  ];
+}
+
+async function launchContext() {
+  return browserType.launchPersistentContext(profileDirectory, launchOptions);
+}
+
+async function waitForChangedBrowserIp(context, baseline, attempts = 20) {
+  let latestIp;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    latestIp = await fetchIpThroughBrowser(context).catch(() => undefined);
+    if (latestIp && latestIp !== baseline) return latestIp;
+  }
+  return latestIp;
+}
+
+let context = await launchContext();
+let vpnIp;
+try {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await acceptTermsEverywhere(context);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  const { page: popup } = await openPopup(context);
+  await startVpn(context, popup);
+  vpnIp = await waitForChangedBrowserIp(context, baselineIp);
+
+  if (!vpnIp) {
+    throw new Error(`Unable to verify ${PROVIDER} through an external IP check.`);
+  }
+  if (vpnIp === baselineIp) {
+    throw new Error(`${PROVIDER} did not change the browser public IP.`);
+  }
+} finally {
+  await context.close();
+}
+
+context = await launchContext();
+let restartIp;
+try {
+  restartIp = await waitForChangedBrowserIp(context, baselineIp);
+  if (!restartIp || restartIp === baselineIp) {
+    throw new Error(`${PROVIDER} did not remain active after a browser restart.`);
+  }
+} finally {
+  await context.close();
+}
+
+await writeFile(
+  statusPath,
+  `${JSON.stringify({
+    provider: PROVIDER,
+    browser: browserName,
+    verified: true,
+    restartVerified: true,
+    baselineIp,
+    vpnIp,
+    restartIp,
+    verifiedAt: new Date().toISOString(),
+  }, null, 2)}\n`,
+  "utf8",
+);
+
+console.log(
+  `${PROVIDER} is active and restart-persistent in ${browserName}: ` +
+  `${baselineIp} -> ${restartIp}`,
+);
