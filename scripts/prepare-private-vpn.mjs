@@ -213,6 +213,17 @@ async function openPopup(context) {
   throw new Error(`${PROVIDER} did not become available in ${browserName}.`);
 }
 
+async function isVpnConnected(page) {
+  const text = await bodyText(page);
+  if (/\bdisconnect\b|turn off|vpn is on/i.test(text)) return true;
+  if (/\bconnected\b/i.test(text) && !/\bnot connected\b|\bdisconnected\b/i.test(text)) {
+    return true;
+  }
+
+  const onControl = page.getByText(/^on$/i).last();
+  return onControl.isVisible().catch(() => false);
+}
+
 async function clickVpnControl(page) {
   const startNames = /start vpn|protect me|turn on|connect/i;
 
@@ -255,16 +266,13 @@ async function clickVpnControl(page) {
 }
 
 async function startVpn(context) {
-  const connectedPattern = /connected|protected|vpn is on|turn off|disconnect/i;
-
   for (let attempt = 0; attempt < 8; attempt += 1) {
     await acceptTermsEverywhere(context);
     let page;
 
     try {
       page = await openPopup(context);
-      let text = await bodyText(page);
-      if (connectedPattern.test(text)) return;
+      if (await isVpnConnected(page)) return;
 
       await acceptTerms(page);
       if (page.isClosed()) {
@@ -273,8 +281,7 @@ async function startVpn(context) {
       }
 
       await page.waitForTimeout(750);
-      text = await bodyText(page);
-      if (connectedPattern.test(text)) return;
+      if (await isVpnConnected(page)) return;
 
       if (await clickVpnControl(page)) {
         await page.waitForTimeout(1_500);
@@ -319,6 +326,18 @@ async function fetchIpThroughBrowser(context) {
   }
 
   throw new Error("Unable to determine the browser public IP after enabling the VPN.");
+}
+
+async function capturePopup(context, suffix) {
+  let page;
+  try {
+    page = await openPopup(context);
+    await savePopupDiagnostics(page, suffix);
+  } catch {
+    // Best-effort diagnostics must not replace the verification error.
+  } finally {
+    if (page && !page.isClosed()) await page.close().catch(() => {});
+  }
 }
 
 const baselineIp = await fetchIpOutsideBrowser();
@@ -379,9 +398,11 @@ try {
   vpnIp = await waitForChangedBrowserIp(context, baselineIp);
 
   if (!vpnIp) {
+    await capturePopup(context, "ip-unavailable");
     throw new Error(`Unable to verify ${PROVIDER} through an external IP check.`);
   }
   if (vpnIp === baselineIp) {
+    await capturePopup(context, "ip-unchanged");
     throw new Error(`${PROVIDER} did not change the browser public IP.`);
   }
   console.log(`${PROVIDER} changed the browser public IP to ${vpnIp}.`);
@@ -394,6 +415,7 @@ let restartIp;
 try {
   restartIp = await waitForChangedBrowserIp(context, baselineIp);
   if (!restartIp || restartIp === baselineIp) {
+    await capturePopup(context, "restart-ip-unchanged");
     throw new Error(`${PROVIDER} did not remain active after a browser restart.`);
   }
 } finally {
