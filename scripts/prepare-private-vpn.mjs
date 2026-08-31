@@ -120,9 +120,11 @@ if (browserName === "chrome") {
       .setPreference("extensions.enabledScopes", 15);
     if (restart) options.setProfile(profileDirectory);
 
+    const service = new firefox.ServiceBuilder().addArguments("--allow-system-access");
     const driver = await new Builder()
       .forBrowser("firefox")
       .setFirefoxOptions(options)
+      .setFirefoxService(service)
       .build();
 
     if (!restart) {
