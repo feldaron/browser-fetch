@@ -76,8 +76,6 @@ jobs:
             executable="$(command -v firefox)"
           else
             google-chrome --version
-            ensure_driver chromedriver "${CHROMEWEBDRIVER:-/usr/local/share/chromedriver-linux64}"
-            chromedriver --version
             executable="$(command -v google-chrome)"
           fi
           test -x "$executable"
@@ -106,7 +104,18 @@ jobs:
             test -s "$extension_dir/$extension_id.xpi"
             echo "BROWSEC_FIREFOX_EXTENSION_ID=$extension_id" >> "$GITHUB_ENV"
           else
-            echo "Chrome Browsec is downloaded and installed by WebDriver BiDi during verification."
+            sudo mkdir -p /etc/opt/chrome/policies/managed
+            sudo tee /etc/opt/chrome/policies/managed/private-browser-vpn.json > /dev/null <<'JSON'
+          {
+            "ExtensionSettings": {
+              "omghfjlpggmjjaagoclmmobgdodcjboh": {
+                "installation_mode": "force_installed",
+                "update_url": "https://clients2.google.com/service/update2/crx",
+                "toolbar_pin": "force_pinned"
+              }
+            }
+          }
+          JSON
           fi
 
       - name: Start virtual display
