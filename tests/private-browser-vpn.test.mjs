@@ -10,7 +10,7 @@ test("private browser defaults to Firefox and gates exposure on a verified VPN",
   const workflow = await readFile(workflowPath, "utf8");
 
   assert.match(workflow, /default: firefox/);
-  assert.match(workflow, /Configure Browsec VPN policy/);
+  assert.match(workflow, /Stage Browsec VPN extension/);
   assert.match(workflow, /Install, activate and verify Browsec VPN/);
   assert.match(workflow, /restartVerified == true/);
 
@@ -30,6 +30,7 @@ test("Browsec is configured for both Firefox and Chrome", async () => {
   assert.match(workflow, /BROWSEC_FIREFOX_EXTENSION_ID/);
   assert.match(launcher, /BROWSEC_FIREFOX_EXTENSION_ID/);
   assert.match(vpnSetup, /browsec@browsec\.com/);
+  assert.match(vpnSetup, /selenium-webdriver/);
 
   assert.match(workflow, /omghfjlpggmjjaagoclmmobgdodcjboh/);
   assert.match(vpnSetup, /omghfjlpggmjjaagoclmmobgdodcjboh/);
