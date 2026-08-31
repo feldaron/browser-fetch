@@ -1,33 +1,27 @@
-import { spawn } from "node:child_process";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { isIP } from "node:net";
 import path from "node:path";
 
+const require = createRequire(import.meta.url);
+const { Builder, By } = require("selenium-webdriver");
+const chrome = require("selenium-webdriver/chrome");
+
 const PROVIDER = "Browsec";
 const EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh";
-const VPN_COUNTRY = (process.env.PRIVATE_BROWSER_VPN_COUNTRY ?? "uk").toLowerCase();
 const executable = process.env.PRIVATE_BROWSER_EXECUTABLE ?? "google-chrome";
 const profileRoot = process.env.PRIVATE_BROWSER_PROFILE_ROOT ?? "/tmp/private-browser-profile";
 const profileDirectory = path.join(profileRoot, "chrome");
+const downloadDirectory = process.env.PRIVATE_BROWSER_DOWNLOAD_DIRECTORY ?? "/tmp/private-browser/downloads";
 const statusPath = process.env.PRIVATE_BROWSER_VPN_STATUS ?? "/tmp/private-browser/vpn-status.json";
-const diagnosticsDirectory = path.dirname(statusPath);
-const devToolsActivePortPath = path.join(profileDirectory, "DevToolsActivePort");
-const extensionInstallRoot = path.join(profileDirectory, "Default", "Extensions", EXTENSION_ID);
-const ACCEPTED_SHOWN_KEY = "startup terms and conditions accepted shown";
-const ACCEPT_PHASE_KEY = "First start accept terms and conditions: phase";
-
-if (!/^[a-z]{2,3}$/.test(VPN_COUNTRY)) {
-  throw new Error(`Invalid Browsec country code: ${VPN_COUNTRY}`);
-}
 
 await Promise.all([
   mkdir(profileDirectory, { recursive: true }),
-  mkdir(diagnosticsDirectory, { recursive: true }),
+  mkdir(downloadDirectory, { recursive: true }),
+  mkdir(path.dirname(statusPath), { recursive: true }),
 ]);
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function extractIp(text) {
   const trimmed = String(text ?? "").trim();
@@ -51,7 +45,7 @@ async function fetchIpOutsideBrowser() {
   ]) {
     try {
       const response = await fetch(endpoint, {
-        headers: { "user-agent": "LaptopValue-private-browser-vpn-check/10.0" },
+        headers: { "user-agent": "LaptopValue-private-browser-vpn-check/11.0" },
         signal: AbortSignal.timeout(8_000),
       });
       if (!response.ok) continue;
@@ -62,522 +56,263 @@ async function fetchIpOutsideBrowser() {
   throw new Error("Unable to determine the runner public IP before enabling the VPN.");
 }
 
-class CdpClient {
-  constructor(url) {
-    this.url = url;
-    this.socket = null;
-    this.nextId = 1;
-    this.pending = new Map();
-  }
-
-  async connect() {
-    this.socket = new WebSocket(this.url);
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error("Timed out opening Chrome DevTools websocket.")),
-        8_000,
-      );
-      this.socket.addEventListener(
-        "open",
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-      this.socket.addEventListener(
-        "error",
-        () => {
-          clearTimeout(timer);
-          reject(new Error("Unable to open Chrome DevTools websocket."));
-        },
-        { once: true },
-      );
-    });
-
-    this.socket.addEventListener("message", (event) => {
-      let message;
-      try {
-        message = JSON.parse(String(event.data));
-      } catch {
-        return;
-      }
-      if (!message.id || !this.pending.has(message.id)) return;
-      const pending = this.pending.get(message.id);
-      this.pending.delete(message.id);
-      clearTimeout(pending.timer);
-      if (message.error) {
-        pending.reject(new Error(message.error.message ?? "Chrome DevTools command failed."));
-      } else {
-        pending.resolve(message.result ?? {});
-      }
-    });
-  }
-
-  command(method, params = {}, timeoutMs = 8_000, sessionId = undefined) {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Timed out running Chrome DevTools command ${method}.`));
-      }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
-      this.socket.send(JSON.stringify({
-        id,
-        method,
-        params,
-        ...(sessionId ? { sessionId } : {}),
-      }));
-    });
-  }
-
-  close() {
-    try {
-      this.socket?.close();
-    } catch {}
-  }
-}
-
-async function readDevToolsPort() {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    try {
-      const [portText] = (await readFile(devToolsActivePortPath, "utf8"))
-        .trim()
-        .split(/\r?\n/);
-      const port = Number(portText);
-      if (Number.isInteger(port) && port > 0) return port;
-    } catch {}
-    await sleep(150);
-  }
-  throw new Error("Normal Chrome did not expose a DevTools port.");
-}
-
-async function getBrowserVersion(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
-    signal: AbortSignal.timeout(4_000),
-  });
-  if (!response.ok) throw new Error(`Chrome version endpoint returned HTTP ${response.status}.`);
-  return response.json();
-}
-
-async function listTargets(port) {
-  const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
-    signal: AbortSignal.timeout(4_000),
-  });
-  if (!response.ok) throw new Error(`Chrome target list returned HTTP ${response.status}.`);
-  return response.json();
-}
-
-async function createTarget(port, url) {
-  const response = await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`, {
-    method: "PUT",
-    signal: AbortSignal.timeout(4_000),
-  });
-  if (!response.ok) throw new Error(`Chrome could not create target ${url}: HTTP ${response.status}.`);
-  return response.json();
-}
-
-async function closeTarget(port, id) {
-  await fetch(`http://127.0.0.1:${port}/json/close/${encodeURIComponent(id)}`, {
-    signal: AbortSignal.timeout(4_000),
-  }).catch(() => {});
-}
-
-async function evaluatePageTarget(target, expression, { timeoutMs = 5_000 } = {}) {
-  if (!target?.webSocketDebuggerUrl) throw new Error("Chrome page target has no DevTools websocket URL.");
-  const client = new CdpClient(target.webSocketDebuggerUrl);
-  await client.connect();
-  try {
-    const result = await client.command(
-      "Runtime.evaluate",
-      { expression, returnByValue: true, userGesture: true },
-      timeoutMs,
-    );
-    if (result.exceptionDetails) {
-      throw new Error(
-        result.exceptionDetails.exception?.description ??
-        result.exceptionDetails.text ??
-        "Chrome page evaluation failed.",
-      );
+const acceptTermsScript = `
+  const nodes = [];
+  const visit = (root) => {
+    for (const element of root.querySelectorAll('*')) {
+      nodes.push(element);
+      if (element.shadowRoot) visit(element.shadowRoot);
     }
-    return result.result?.value;
-  } finally {
-    client.close();
+  };
+  visit(document);
+  const label = (element) => [
+    element.innerText,
+    element.textContent,
+    element.getAttribute('aria-label'),
+    element.getAttribute('title'),
+    element.getAttribute('value'),
+  ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+  const pageText = nodes.map(label).join(' ');
+  if (!/(terms|privacy policy|privacy notice|consent)/i.test(pageText)) {
+    return { relevant: false, clicked: false, toggled: 0 };
   }
-}
-
-async function launchNormalChrome() {
-  await rm(devToolsActivePortPath, { force: true }).catch(() => {});
-  const browser = spawn(
-    executable,
-    [
-      `--user-data-dir=${profileDirectory}`,
-      "--remote-debugging-port=0",
-      "--remote-allow-origins=*",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--window-size=1600,1000",
-      "about:blank",
-    ],
-    { env: process.env, stdio: ["ignore", "ignore", "pipe"] },
-  );
-
-  let stderr = "";
-  browser.stderr?.on("data", (chunk) => {
-    stderr += String(chunk);
-    if (stderr.length > 30_000) stderr = stderr.slice(-30_000);
-  });
-
-  try {
-    const port = await readDevToolsPort();
-    return { browser, port, getStderr: () => stderr };
-  } catch (error) {
-    browser.kill("SIGTERM");
-    throw new Error(`${error.message}\n${stderr}`);
-  }
-}
-
-async function stopChrome(session) {
-  if (!session?.browser) return;
-  try {
-    const version = await getBrowserVersion(session.port);
-    if (version.webSocketDebuggerUrl) {
-      const client = new CdpClient(version.webSocketDebuggerUrl);
-      await client.connect();
-      await client.command("Browser.close", {}, 4_000).catch(() => {});
-      client.close();
+  let toggled = 0;
+  for (const element of nodes) {
+    const type = element.getAttribute('type');
+    const role = element.getAttribute('role');
+    const tag = element.tagName.toLowerCase();
+    const toggle = type === 'checkbox' || role === 'checkbox' || role === 'switch' || tag === 'c-switch';
+    if (!toggle) continue;
+    const checked = type === 'checkbox' && 'checked' in element
+      ? Boolean(element.checked)
+      : element.getAttribute('aria-checked') === 'true' ||
+        /(^|[\\s_-])(on|active|checked|enabled)([\\s_-]|$)/i.test(String(element.className || ''));
+    if (!checked) {
+      element.click();
+      toggled += 1;
     }
+  }
+  const accept = nodes.find((element) => {
+    const text = label(element);
+    const clickable = ['BUTTON', 'A', 'LABEL', 'INPUT'].includes(element.tagName) ||
+      ['button', 'link'].includes(element.getAttribute('role'));
+    return clickable && /^(accept|agree|continue|confirm)(\\b|\\s|$)/i.test(text);
+  });
+  if (accept && !accept.disabled && accept.getAttribute('aria-disabled') !== 'true') {
+    accept.click();
+    return { relevant: true, clicked: true, toggled };
+  }
+  return { relevant: true, clicked: false, toggled };
+`;
+
+const activationScript = `
+  const mode = arguments[0];
+  const nodes = [];
+  const visit = (root) => {
+    for (const element of root.querySelectorAll('*')) {
+      nodes.push(element);
+      if (element.shadowRoot) visit(element.shadowRoot);
+    }
+  };
+  visit(document);
+  const label = (element) => [
+    element.innerText,
+    element.textContent,
+    element.getAttribute('aria-label'),
+    element.getAttribute('title'),
+    element.getAttribute('value'),
+  ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+  if (mode === 'text') {
+    const action = nodes.find((element) => {
+      const text = label(element);
+      const clickable = ['BUTTON', 'A', 'LABEL', 'INPUT'].includes(element.tagName) ||
+        ['button', 'link'].includes(element.getAttribute('role'));
+      return clickable && /^(start vpn|protect me|turn on|connect)(\\b|\\s|$)/i.test(text);
+    });
+    if (action) {
+      action.click();
+      return { clicked: true, control: 'text', label: label(action) };
+    }
+  }
+  if (mode === 'c-switch') {
+    const target = nodes.filter((element) => element.tagName.toLowerCase() === 'c-switch').at(-1);
+    if (target) {
+      target.click();
+      return { clicked: true, control: 'c-switch', label: label(target) };
+    }
+  }
+  if (mode === 'role-switch') {
+    const target = nodes.filter((element) => element.getAttribute('role') === 'switch').at(-1);
+    if (target) {
+      target.click();
+      return { clicked: true, control: 'role-switch', label: label(target) };
+    }
+  }
+  if (mode === 'off') {
+    const target = nodes.find((element) => /^off$/i.test(label(element)));
+    if (target) {
+      target.click();
+      return { clicked: true, control: 'off-label', label: label(target) };
+    }
+  }
+  return { clicked: false, control: mode };
+`;
+
+async function bodyText(driver) {
+  try {
+    return await driver.findElement(By.css("body")).getText();
   } catch {
-    session.browser.kill("SIGTERM");
+    return "";
   }
-
-  await Promise.race([
-    new Promise((resolve) => session.browser.once("exit", resolve)),
-    sleep(4_000),
-  ]);
-  if (session.browser.exitCode === null) session.browser.kill("SIGKILL");
-  await sleep(500);
 }
 
-async function resolveManagedExtension() {
-  let lastDetail = "extension directory not created";
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+async function acceptTermsEverywhere(driver) {
+  const original = await driver.getWindowHandle().catch(() => undefined);
+  const handles = await driver.getAllWindowHandles().catch(() => []);
+  for (const handle of handles) {
     try {
-      const entries = (await readdir(extensionInstallRoot, { withFileTypes: true }))
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => entry.name)
-        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
-      lastDetail = entries.length
-        ? `versions found: ${entries.join(", ")}`
-        : "extension directory is empty";
-
-      for (const version of entries) {
-        try {
-          const manifestPath = path.join(extensionInstallRoot, version, "manifest.json");
-          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-          const popupPath = manifest?.action?.default_popup ?? manifest?.browser_action?.default_popup;
-          const workerPath = manifest?.background?.service_worker;
-          if (typeof workerPath !== "string" || !workerPath.trim()) {
-            lastDetail = `Browsec ${manifest?.version ?? version} has no MV3 service worker`;
-            continue;
-          }
-          return {
-            version: String(manifest.version ?? version),
-            manifestVersion: manifest.manifest_version,
-            popupPath: typeof popupPath === "string" ? popupPath.replace(/^\/+/, "") : null,
-            popupUrl: typeof popupPath === "string"
-              ? `chrome-extension://${EXTENSION_ID}/${popupPath.replace(/^\/+/, "")}`
-              : null,
-            workerPath: workerPath.replace(/^\/+/, ""),
-            workerUrl: `chrome-extension://${EXTENSION_ID}/${workerPath.replace(/^\/+/, "")}`,
-          };
-        } catch (error) {
-          lastDetail = `could not read installed manifest: ${error?.message ?? error}`;
-        }
+      await driver.switchTo().window(handle);
+      const url = await driver.getCurrentUrl().catch(() => "");
+      if (!url.startsWith(`chrome-extension://${EXTENSION_ID}/`) && !/https?:\/\/([^.]+\.)*browsec\.com\//i.test(url)) continue;
+      const result = await driver.executeScript(acceptTermsScript);
+      if (result?.relevant) {
+        console.log(`Browsec first-run acceptance: ${JSON.stringify(result)}`);
+        await sleep(700);
       }
     } catch {}
+  }
+  const remaining = await driver.getAllWindowHandles().catch(() => []);
+  if (original && remaining.includes(original)) {
+    await driver.switchTo().window(original).catch(() => {});
+  } else if (remaining.length) {
+    await driver.switchTo().window(remaining[0]).catch(() => {});
+  }
+}
+
+async function openPopup(driver) {
+  const target = `chrome-extension://${EXTENSION_ID}/popup/popup.html`;
+  let lastError;
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await acceptTermsEverywhere(driver);
+    try {
+      await driver.get(target);
+      await sleep(500);
+      const current = await driver.getCurrentUrl();
+      const text = await bodyText(driver);
+      if (/ERR_BLOCKED_BY_CLIENT|has been blocked by Chrome|not found/i.test(text)) {
+        throw new Error("Chrome reports the managed Browsec popup is unavailable.");
+      }
+      if (current.startsWith(target)) return;
+    } catch (error) {
+      lastError = error;
+    }
     await sleep(500);
   }
-  throw new Error(`Managed Browsec was not ready in the Chrome profile after 30 seconds (${lastDetail}).`);
+  throw lastError ?? new Error("The managed Browsec extension did not become available in Chrome.");
 }
 
-async function findServiceWorker(port, extensionInfo) {
-  const targets = await listTargets(port).catch(() => []);
-  return targets.find(
-    (target) => target.type === "service_worker" && target.url === extensionInfo.workerUrl,
-  ) ?? targets.find(
-    (target) => target.type === "service_worker" &&
-      target.url?.startsWith(`chrome-extension://${EXTENSION_ID}/`),
-  );
-}
-
-async function wakeServiceWorker(port, extensionInfo) {
-  let lastTargets = [];
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const target = await findServiceWorker(port, extensionInfo);
-    if (target) return target;
-
-    lastTargets = await listTargets(port).catch(() => []);
-    if (extensionInfo.popupUrl && attempt % 5 === 0) {
-      let popup;
-      try {
-        popup = await createTarget(port, extensionInfo.popupUrl);
-        await sleep(350);
-      } catch {}
-      if (popup?.id) await closeTarget(port, popup.id);
-    }
-    await sleep(350);
-  }
-
-  const summary = lastTargets
-    .filter((target) => target.url?.includes(EXTENSION_ID) || target.type === "service_worker")
-    .map((target) => `${target.type}:${target.url}`)
-    .join(", ");
-  throw new Error(`Browsec service worker did not start. Seen targets: ${summary || "none"}.`);
-}
-
-async function attachServiceWorker(port, extensionInfo) {
-  const worker = await wakeServiceWorker(port, extensionInfo);
-  const version = await getBrowserVersion(port);
-  if (!version.webSocketDebuggerUrl) {
-    throw new Error("Normal Chrome did not expose its browser DevTools websocket.");
-  }
-
-  const client = new CdpClient(version.webSocketDebuggerUrl);
-  await client.connect();
-  try {
-    const attached = await client.command(
-      "Target.attachToTarget",
-      { targetId: worker.id, flatten: true },
-      6_000,
-    );
-    if (!attached.sessionId) throw new Error("Chrome did not return a Browsec worker CDP session.");
-    await client.command("Runtime.enable", {}, 6_000, attached.sessionId);
-    console.log(`Attached to Browsec service worker target ${worker.id}.`);
-    return { client, sessionId: attached.sessionId, targetId: worker.id };
-  } catch (error) {
-    client.close();
-    throw error;
-  }
-}
-
-async function closeServiceWorkerSession(attached) {
-  if (!attached?.client) return;
-  await attached.client.command(
-    "Target.detachFromTarget",
-    { sessionId: attached.sessionId },
-    3_000,
-  ).catch(() => {});
-  attached.client.close();
-}
-
-async function evaluateWorker(attached, expression, timeoutMs = 8_000) {
-  const result = await attached.client.command(
-    "Runtime.evaluate",
-    {
-      expression,
-      returnByValue: true,
-      awaitPromise: true,
-      userGesture: true,
-    },
-    timeoutMs,
-    attached.sessionId,
-  );
-  if (result.exceptionDetails) {
-    throw new Error(
-      result.exceptionDetails.exception?.description ??
-      result.exceptionDetails.text ??
-      "Browsec worker evaluation failed.",
-    );
-  }
-  return result.result?.value;
-}
-
-async function acceptStartupConditions(attached) {
-  const result = await evaluateWorker(
-    attached,
-    `(async () => {
-      await chrome.storage.local.set({
-        ${JSON.stringify(ACCEPTED_SHOWN_KEY)}: true,
-        ${JSON.stringify(ACCEPT_PHASE_KEY)}: 2
-      });
-      const saved = await chrome.storage.local.get([
-        ${JSON.stringify(ACCEPTED_SHOWN_KEY)},
-        ${JSON.stringify(ACCEPT_PHASE_KEY)}
-      ]);
-      return {
-        shown: saved[${JSON.stringify(ACCEPTED_SHOWN_KEY)}] === true,
-        phase: saved[${JSON.stringify(ACCEPT_PHASE_KEY)}]
-      };
-    })()`,
-  );
-  if (!result?.shown || result?.phase !== 2) {
-    throw new Error(`Browsec startup conditions were not persisted: ${JSON.stringify(result)}`);
-  }
-  console.log(`Browsec startup conditions accepted: ${JSON.stringify(result)}`);
-}
-
-async function enableBrowsec(attached) {
-  const result = await evaluateWorker(
-    attached,
-    `(async () => {
-      const data = await chrome.storage.local.get(['userPac']);
-      const stored = data.userPac;
-      const current = stored && typeof stored === 'object' && Array.isArray(stored.filters)
-        ? stored
-        : { mode: 'direct', country: null, broken: false, filters: [] };
-      const direct = {
-        ...current,
-        mode: 'direct',
-        country: current.country ?? null,
-        broken: false,
-        filters: current.filters
-      };
-      const next = {
-        ...current,
-        mode: 'proxy',
-        country: ${JSON.stringify(VPN_COUNTRY)},
-        broken: false,
-        filters: current.filters
-      };
-      await chrome.storage.local.set({ userPac: direct });
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      await chrome.storage.local.set({ userPac: next });
-      return { defaulted: stored == null, next };
-    })()`,
-  );
-  if (result?.next?.mode !== "proxy" || result?.next?.country !== VPN_COUNTRY) {
-    throw new Error(`Browsec rejected requested proxy state: ${JSON.stringify(result)}`);
-  }
-  console.log(`Browsec userPac enabled through attached service worker: ${JSON.stringify(result)}`);
-}
-
-async function readAppliedProxyState(attached) {
-  return evaluateWorker(
-    attached,
-    `(async () => {
-      const data = await chrome.storage.local.get(['lowLevelPac', 'userPac']);
-      const low = data.lowLevelPac ?? null;
-      const proxySetting = await new Promise((resolve) => {
-        try {
-          chrome.proxy.settings.get({ incognito: false }, resolve);
-        } catch (error) {
-          resolve({ error: String(error?.message ?? error) });
-        }
-      });
-      const countryServers = Array.isArray(low?.countries?.[${JSON.stringify(VPN_COUNTRY)}])
-        ? low.countries[${JSON.stringify(VPN_COUNTRY)}].length
-        : 0;
-      return {
-        userPac: data.userPac ?? null,
-        globalReturn: low?.globalReturn ?? null,
-        countryServers,
-        proxyLevel: proxySetting?.levelOfControl ?? null,
-        proxyMode: proxySetting?.value?.mode ?? null,
-        proxyError: proxySetting?.error ?? null
-      };
-    })()`,
-  );
-}
-
-async function waitForAppliedProxy(attached) {
-  let latest;
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    latest = await readAppliedProxyState(attached).catch(() => undefined);
-    if (
-      latest?.userPac?.mode === "proxy" &&
-      latest?.userPac?.country === VPN_COUNTRY &&
-      latest?.globalReturn === VPN_COUNTRY &&
-      latest?.countryServers > 0 &&
-      ["controllable_by_this_extension", "controlled_by_this_extension"].includes(latest?.proxyLevel)
-    ) {
-      console.log(`Browsec Chrome proxy applied: ${JSON.stringify(latest)}`);
-      return latest;
-    }
-    await sleep(300);
-  }
-  throw new Error(`Browsec did not apply its Chrome PAC after activation: ${JSON.stringify(latest ?? {})}`);
-}
-
-async function fetchIpThroughChrome(port) {
+async function fetchIpThroughBrowser(driver) {
+  const original = await driver.getWindowHandle().catch(() => undefined);
   for (const endpoint of [
     "https://api.ipify.org?format=json",
     "https://ifconfig.co/ip",
     "https://icanhazip.com/",
   ]) {
-    let target;
+    let opened = false;
     try {
-      target = await createTarget(port, endpoint);
-      for (let attempt = 0; attempt < 8; attempt += 1) {
-        await sleep(300);
-        const value = await evaluatePageTarget(
-          target,
-          "document.body ? document.body.innerText : ''",
-          { timeoutMs: 3_000 },
-        ).catch(() => "");
-        const ip = extractIp(value);
-        if (ip) return ip;
+      await driver.switchTo().newWindow("tab");
+      opened = true;
+      await driver.get(endpoint);
+      await sleep(300);
+      const ip = extractIp(await bodyText(driver));
+      if (ip) {
+        await driver.close().catch(() => {});
+        if (original) await driver.switchTo().window(original).catch(() => {});
+        return ip;
       }
-    } catch {} finally {
-      if (target?.id) await closeTarget(port, target.id);
-    }
+    } catch {}
+    if (opened) await driver.close().catch(() => {});
+    if (original) await driver.switchTo().window(original).catch(() => {});
   }
   return undefined;
 }
 
-async function waitForChangedIp(port, baseline, attempts = 6) {
+async function waitForChangedIp(driver, baseline, attempts = 6) {
   let latest;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    latest = await fetchIpThroughChrome(port).catch(() => undefined);
+    latest = await fetchIpThroughBrowser(driver).catch(() => undefined);
     if (latest && latest !== baseline) return latest;
-    await sleep(500);
+    await sleep(600);
   }
   return latest;
+}
+
+async function activateAndVerify(driver, baseline) {
+  await acceptTermsEverywhere(driver);
+  await openPopup(driver);
+  await acceptTermsEverywhere(driver);
+  await openPopup(driver);
+  const alreadyChanged = await waitForChangedIp(driver, baseline, 2);
+  if (alreadyChanged && alreadyChanged !== baseline) return alreadyChanged;
+  for (const mode of ["text", "c-switch", "role-switch", "off"]) {
+    await openPopup(driver);
+    const result = await driver.executeScript(activationScript, mode)
+      .catch((error) => ({ clicked: false, control: mode, error: String(error?.message ?? error) }));
+    console.log(`${PROVIDER} activation via ${mode}: ${JSON.stringify(result)}`);
+    await sleep(1_200);
+    const changed = await waitForChangedIp(driver, baseline, 4);
+    if (changed && changed !== baseline) return changed;
+  }
+  return undefined;
+}
+
+async function buildDriver() {
+  const options = new chrome.Options()
+    .setChromeBinaryPath(executable)
+    .addArguments(
+      `--user-data-dir=${profileDirectory}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--window-size=1600,1000",
+      "--remote-debugging-pipe",
+      "--enable-unsafe-extension-debugging",
+    );
+  const driver = await new Builder()
+    .forBrowser("chrome")
+    .setChromeOptions(options)
+    .build();
+  await driver.manage().setTimeouts({ pageLoad: 8_000, script: 8_000 });
+  return driver;
 }
 
 const baselineIp = await fetchIpOutsideBrowser();
 console.log(`Runner public IP before ${PROVIDER}: ${baselineIp}`);
 
-let session = await launchNormalChrome();
+let driver = await buildDriver();
 let vpnIp;
-let extensionInfo;
-let appliedProxy;
-let workerSession;
 try {
-  extensionInfo = await resolveManagedExtension();
-  console.log(`Managed Browsec installed: ${JSON.stringify(extensionInfo)}`);
-  workerSession = await attachServiceWorker(session.port, extensionInfo);
-  await acceptStartupConditions(workerSession);
-  await enableBrowsec(workerSession);
-  appliedProxy = await waitForAppliedProxy(workerSession);
-  vpnIp = await waitForChangedIp(session.port, baselineIp, 6);
+  vpnIp = await activateAndVerify(driver, baselineIp);
   if (!vpnIp || vpnIp === baselineIp) {
-    throw new Error(`${PROVIDER} applied its Chrome proxy state but did not change the browser public IP.`);
+    throw new Error(`${PROVIDER} did not change the managed Chrome public IP.`);
   }
-  console.log(`${PROVIDER} changed the managed normal Chrome public IP to ${vpnIp}.`);
+  console.log(`${PROVIDER} changed the managed Chrome public IP to ${vpnIp}.`);
 } finally {
-  await closeServiceWorkerSession(workerSession).catch(() => {});
-  await stopChrome(session);
+  await driver.quit().catch(() => {});
 }
 
-session = await launchNormalChrome();
+driver = await buildDriver();
 let restartIp;
-let restartProxy;
-workerSession = undefined;
 try {
-  const restartedExtension = await resolveManagedExtension();
-  workerSession = await attachServiceWorker(session.port, restartedExtension);
-  restartProxy = await waitForAppliedProxy(workerSession);
-  restartIp = await waitForChangedIp(session.port, baselineIp, 6);
+  await openPopup(driver);
+  restartIp = await waitForChangedIp(driver, baselineIp, 8);
   if (!restartIp || restartIp === baselineIp) {
     throw new Error(`${PROVIDER} did not remain active after a normal Chrome restart.`);
   }
   console.log(`${PROVIDER} remained active after normal Chrome restart: ${restartIp}.`);
 } finally {
-  await closeServiceWorkerSession(workerSession).catch(() => {});
-  await stopChrome(session);
+  await driver.quit().catch(() => {});
 }
 
 await writeFile(
@@ -585,16 +320,12 @@ await writeFile(
   `${JSON.stringify({
     provider: PROVIDER,
     browser: "chrome",
-    country: VPN_COUNTRY,
     verified: true,
     restartVerified: true,
     extensionId: EXTENSION_ID,
-    extensionVersion: extensionInfo.version,
     baselineIp,
     vpnIp,
     restartIp,
-    proxyLevel: appliedProxy?.proxyLevel ?? null,
-    restartProxyLevel: restartProxy?.proxyLevel ?? null,
     verifiedAt: new Date().toISOString(),
   }, null, 2)}\n`,
   "utf8",
