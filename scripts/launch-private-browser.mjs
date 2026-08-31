@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+
+const FIREFOX_EXTENSION_ID = "browsec@browsec.com";
+const FIREFOX_EXTENSION_UUID = "8f9b7b1a-6d40-4f5c-a7db-5e8f86f24691";
 
 const rawUrl = process.argv[2] ?? "https://www.currys.co.uk/";
 const startUrl = new URL(rawUrl);
@@ -36,23 +39,41 @@ if (browserName === "firefox") {
       'user_pref("browser.download.folderList", 2);',
       'user_pref("browser.download.useDownloadDir", true);',
       'user_pref("browser.download.alwaysOpenPanel", false);',
+      'user_pref("extensions.autoDisableScopes", 0);',
+      'user_pref("extensions.enabledScopes", 15);',
+      `user_pref("extensions.webextensions.uuids", ${JSON.stringify(JSON.stringify({
+        [FIREFOX_EXTENSION_ID]: FIREFOX_EXTENSION_UUID,
+      }))});`,
       "",
     ].join("\n"),
     "utf8",
   );
 } else {
   const defaultProfileDirectory = path.join(profileDirectory, "Default");
+  const preferencesPath = path.join(defaultProfileDirectory, "Preferences");
   await mkdir(defaultProfileDirectory, { recursive: true });
+
+  let preferences = {};
+  try {
+    preferences = JSON.parse(await readFile(preferencesPath, "utf8"));
+  } catch {
+    // A fresh Chrome profile has no Preferences file yet.
+  }
+
+  preferences.download = {
+    ...(preferences.download ?? {}),
+    default_directory: downloadDirectory,
+    directory_upgrade: true,
+    prompt_for_download: false,
+  };
+  preferences.safebrowsing = {
+    ...(preferences.safebrowsing ?? {}),
+    enabled: true,
+  };
+
   await writeFile(
-    path.join(defaultProfileDirectory, "Preferences"),
-    `${JSON.stringify({
-      download: {
-        default_directory: downloadDirectory,
-        directory_upgrade: true,
-        prompt_for_download: false,
-      },
-      safebrowsing: { enabled: true },
-    })}\n`,
+    preferencesPath,
+    `${JSON.stringify(preferences)}\n`,
     "utf8",
   );
 }
