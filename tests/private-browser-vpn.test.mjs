@@ -31,7 +31,9 @@ test("Firefox stages the official add-on and resolves its runtime origin from th
   assert.match(workflow, /BROWSEC_FIREFOX_EXTENSION_ID/);
   assert.match(launcher, /BROWSEC_FIREFOX_EXTENSION_ID/);
   assert.match(vpnSetup, /browsec@browsec\.com/);
-  assert.match(vpnSetup, /extensions\.webextensions\.uuids/);
+  assert.match(vpnSetup, /prefs\.js/);
+  assert.match(vpnSetup, /extensions\.json/);
+  assert.match(vpnSetup, /webextensions/);
   assert.match(vpnSetup, /moz:profile/);
   assert.doesNotMatch(vpnSetup, /about:debugging#\/runtime\/this-firefox/);
   assert.doesNotMatch(vpnSetup, /ChromeUtils\.importESModule/);
