@@ -68,60 +68,75 @@ async function fetchIpOutsideBrowser() {
 }
 
 async function bodyText(page) {
+  if (page.isClosed()) return "";
   return page.locator("body").innerText({ timeout: 3_000 }).catch(() => "");
 }
 
 function isBrowsecPage(page) {
-  const url = page.url();
-  return url.startsWith("chrome-extension://") ||
-    url.startsWith("moz-extension://") ||
-    /https?:\/\/([^.]+\.)*browsec\.com\//i.test(url);
+  if (page.isClosed()) return false;
+  try {
+    const url = page.url();
+    return url.startsWith("chrome-extension://") ||
+      url.startsWith("moz-extension://") ||
+      /https?:\/\/([^.]+\.)*browsec\.com\//i.test(url);
+  } catch {
+    return false;
+  }
 }
 
 async function acceptTerms(page) {
   if (!isBrowsecPage(page)) return false;
-  const text = await bodyText(page);
-  if (!/terms|conditions|privacy|accept|agree|consent/i.test(text)) return false;
 
-  let changed = false;
-  const toggles = page.locator(
-    'input[type="checkbox"], [role="checkbox"], [role="switch"]',
-  );
-  const toggleCount = Math.min(await toggles.count(), 10);
-  for (let index = 0; index < toggleCount; index += 1) {
-    const toggle = toggles.nth(index);
-    const checked = await toggle.isChecked().catch(async () => {
-      const value = await toggle.getAttribute("aria-checked");
-      return value === "true";
-    });
-    if (!checked) {
-      await toggle.click({ force: true }).catch(() => {});
-      changed = true;
+  try {
+    const text = await bodyText(page);
+    if (!/terms|conditions|privacy|accept|agree|consent/i.test(text)) return false;
+
+    let changed = false;
+    const toggles = page.locator(
+      'input[type="checkbox"], [role="checkbox"], [role="switch"]',
+    );
+    const toggleCount = Math.min(await toggles.count(), 10);
+    for (let index = 0; index < toggleCount; index += 1) {
+      if (page.isClosed()) return changed;
+      const toggle = toggles.nth(index);
+      const checked = await toggle.isChecked().catch(async () => {
+        const value = await toggle.getAttribute("aria-checked").catch(() => null);
+        return value === "true";
+      });
+      if (!checked) {
+        await toggle.click({ force: true }).catch(() => {});
+        changed = true;
+      }
     }
-  }
 
-  const acceptNames = /accept|agree|continue|confirm/i;
-  const button = page.getByRole("button", { name: acceptNames }).first();
-  if (await button.count()) {
-    await button.click({ force: true }).catch(() => {});
-    changed = true;
-  } else {
+    if (page.isClosed()) return changed;
+
+    const acceptNames = /accept|agree|continue|confirm/i;
+    const button = page.getByRole("button", { name: acceptNames }).first();
+    if (await button.count().catch(() => 0)) {
+      await button.click({ force: true }).catch(() => {});
+      return true;
+    }
+
     const fallback = page.locator(
       'button, [role="button"], input[type="button"], input[type="submit"]',
     ).filter({ hasText: acceptNames }).first();
-    if (await fallback.count()) {
+    if (await fallback.count().catch(() => 0)) {
       await fallback.click({ force: true }).catch(() => {});
-      changed = true;
+      return true;
     }
-  }
 
-  return changed;
+    return changed;
+  } catch {
+    return false;
+  }
 }
 
 async function acceptTermsEverywhere(context) {
   let changed = false;
   for (const page of context.pages()) {
-    changed = (await acceptTerms(page)) || changed;
+    if (page.isClosed()) continue;
+    changed = (await acceptTerms(page).catch(() => false)) || changed;
   }
   return changed;
 }
@@ -136,7 +151,7 @@ async function openPopup(context) {
     const page = await context.newPage();
     try {
       await page.goto(popupUrl, { waitUntil: "domcontentloaded", timeout: 5_000 });
-      if (page.url().startsWith(popupUrl)) return { page, popupUrl };
+      if (!page.isClosed() && page.url().startsWith(popupUrl)) return page;
     } catch {
       // Force-installed extensions may need a few seconds to arrive from the store.
     }
@@ -147,29 +162,48 @@ async function openPopup(context) {
   throw new Error(`${PROVIDER} did not become available in ${browserName}.`);
 }
 
-async function startVpn(context, page) {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+async function startVpn(context) {
+  const connectedPattern = /connected|protected|vpn is on|turn off|disconnect/i;
+  const startNames = /start vpn|protect me|turn on|connect/i;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     await acceptTermsEverywhere(context);
-    await acceptTerms(page);
+    let page;
 
-    const startNames = /start vpn|protect me|turn on|connect/i;
-    const button = page.getByRole("button", { name: startNames }).first();
-    if (await button.count()) {
-      await button.click({ force: true });
-      return;
+    try {
+      page = await openPopup(context);
+      let text = await bodyText(page);
+      if (connectedPattern.test(text)) return;
+
+      await acceptTerms(page);
+      if (page.isClosed()) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+        continue;
+      }
+
+      text = await bodyText(page);
+      if (connectedPattern.test(text)) return;
+
+      const button = page.getByRole("button", { name: startNames }).first();
+      if (await button.count().catch(() => 0)) {
+        await button.click({ force: true });
+        return;
+      }
+
+      const fallback = page.locator(
+        'button, [role="button"], a, input[type="button"], input[type="submit"]',
+      ).filter({ hasText: startNames }).first();
+      if (await fallback.count().catch(() => 0)) {
+        await fallback.click({ force: true });
+        return;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/closed|destroyed|target/i.test(message)) throw error;
+    } finally {
+      if (page && !page.isClosed()) await page.close().catch(() => {});
     }
 
-    const fallback = page.locator(
-      'button, [role="button"], a, input[type="button"], input[type="submit"]',
-    ).filter({ hasText: startNames }).first();
-    if (await fallback.count()) {
-      await fallback.click({ force: true });
-      return;
-    }
-
-    const text = await bodyText(page);
-    if (/connected|protected|vpn is on|turn off|disconnect/i.test(text)) return;
-    await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
 
@@ -200,6 +234,8 @@ async function fetchIpThroughBrowser(context) {
 }
 
 const baselineIp = await fetchIpOutsideBrowser();
+console.log(`Runner public IP before ${PROVIDER}: ${baselineIp}`);
+
 const browserType = browserName === "firefox" ? firefox : chromium;
 const launchOptions = {
   executablePath: executable,
@@ -250,8 +286,7 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
-  const { page: popup } = await openPopup(context);
-  await startVpn(context, popup);
+  await startVpn(context);
   vpnIp = await waitForChangedBrowserIp(context, baselineIp);
 
   if (!vpnIp) {
@@ -260,6 +295,7 @@ try {
   if (vpnIp === baselineIp) {
     throw new Error(`${PROVIDER} did not change the browser public IP.`);
   }
+  console.log(`${PROVIDER} changed the browser public IP to ${vpnIp}.`);
 } finally {
   await context.close();
 }
