@@ -178,28 +178,41 @@ if (browserName === "chrome") {
 
   async function openExtensionPage(driver, uuid) {
     const target = `moz-extension://${uuid}/popup/popup.html`;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      try {
-        await driver.setContext("chrome");
-        const loaded = await driver.executeScript(`
-          const target = arguments[0];
-          const { Services } = ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs');
-          const browser = window.gBrowser?.selectedBrowser;
-          if (!browser) return false;
-          browser.loadURI(target, {
-            triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
-          });
-          return true;
-        `, target);
-        await driver.setContext("content");
-        if (!loaded) throw new Error("Firefox browser chrome did not expose the selected tab.");
-        await sleep(500);
-        if ((await driver.getCurrentUrl()).startsWith(target)) return;
-      } catch {}
-      finally { await driver.setContext("content").catch(() => {}); }
-      await sleep(600);
+    let lastObservedUri = "";
+
+    try {
+      await driver.setContext("chrome");
+      const opened = await driver.executeScript(`
+        const target = arguments[0];
+        const { Services } = ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs');
+        const tabbrowser = window.gBrowser;
+        if (!tabbrowser) return false;
+        const principal = Services.scriptSecurityManager.getSystemPrincipal();
+        const tab = tabbrowser.addTab(target, { triggeringPrincipal: principal });
+        if (!tab) return false;
+        tabbrowser.selectedTab = tab;
+        return true;
+      `, target);
+      if (!opened) throw new Error("Firefox browser chrome did not create a Browsec tab.");
+
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        lastObservedUri = await driver.executeScript(
+          "return window.gBrowser?.selectedBrowser?.currentURI?.spec ?? '';",
+        ).catch(() => "");
+        if (typeof lastObservedUri === "string" && lastObservedUri.startsWith(target)) {
+          await driver.setContext("content");
+          await sleep(500);
+          return;
+        }
+        await sleep(250);
+      }
+    } finally {
+      await driver.setContext("content").catch(() => {});
     }
-    throw new Error("Firefox could not open Browsec's extension page through browser chrome.");
+
+    throw new Error(
+      `Firefox could not open Browsec's extension page in a privileged tab; last URI: ${lastObservedUri || "unknown"}.`,
+    );
   }
 
   async function activateBrowsec(driver, uuid) {
