@@ -25,8 +25,12 @@ if (browserName === "chrome") {
   const statusPath = process.env.PRIVATE_BROWSER_VPN_STATUS ?? "/tmp/private-browser/vpn-status.json";
   const firefoxXpiPath = process.env.PRIVATE_BROWSER_FIREFOX_VPN_XPI ??
     path.join(profileDirectory, "extensions", `${FIREFOX_EXTENSION_ID}.xpi`);
+  const ACCEPTED_SHOWN_KEY = "startup terms and conditions accepted shown";
+  const ACCEPT_PHASE_KEY = "First start accept terms and conditions: phase";
 
-  if (!/^[a-z]{2}$/.test(VPN_COUNTRY)) throw new Error(`Invalid Browsec country code: ${VPN_COUNTRY}`);
+  if (!/^[a-z]{2,3}$/.test(VPN_COUNTRY)) {
+    throw new Error(`Invalid Browsec country code: ${VPN_COUNTRY}`);
+  }
 
   await Promise.all([
     mkdir(profileDirectory, { recursive: true }),
@@ -58,8 +62,8 @@ if (browserName === "chrome") {
     ]) {
       try {
         const response = await fetch(endpoint, {
-          headers: { "user-agent": "LaptopValue-private-browser-vpn-check/4.0" },
-          signal: AbortSignal.timeout(10_000),
+          headers: { "user-agent": "LaptopValue-private-browser-vpn-check/9.0" },
+          signal: AbortSignal.timeout(8_000),
         });
         if (!response.ok) continue;
         const ip = extractIp(await response.text());
@@ -70,7 +74,11 @@ if (browserName === "chrome") {
   }
 
   async function bodyText(driver) {
-    try { return await driver.findElement(By.css("body")).getText(); } catch { return ""; }
+    try {
+      return await driver.findElement(By.css("body")).getText();
+    } catch {
+      return "";
+    }
   }
 
   async function fetchIpThroughBrowser(driver) {
@@ -78,14 +86,13 @@ if (browserName === "chrome") {
     for (const endpoint of [
       "https://api.ipify.org?format=json",
       "https://ifconfig.co/ip",
-      "https://icanhazip.com/",
     ]) {
       let opened = false;
       try {
         await driver.switchTo().newWindow("tab");
         opened = true;
         await driver.get(endpoint);
-        await sleep(350);
+        await sleep(250);
         const ip = extractIp(await bodyText(driver));
         if (ip) {
           await driver.close().catch(() => {});
@@ -99,12 +106,12 @@ if (browserName === "chrome") {
     return undefined;
   }
 
-  async function waitForChangedIp(driver, baseline, attempts = 18) {
+  async function waitForChangedIp(driver, baseline, attempts = 4) {
     let latest;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       latest = await fetchIpThroughBrowser(driver).catch(() => undefined);
       if (latest && latest !== baseline) return latest;
-      await sleep(1_000);
+      await sleep(500);
     }
     return latest;
   }
@@ -126,7 +133,11 @@ if (browserName === "chrome") {
       .setFirefoxOptions(options)
       .setFirefoxService(service)
       .build();
-    await driver.manage().setTimeouts({ pageLoad: 12_000, script: 20_000 });
+
+    await driver.manage().setTimeouts({
+      pageLoad: 5_000,
+      script: 45_000,
+    });
 
     if (!restart) {
       await readFile(firefoxXpiPath).catch(() => {
@@ -136,7 +147,7 @@ if (browserName === "chrome") {
       if (installedId !== FIREFOX_EXTENSION_ID) {
         throw new Error(`Unexpected Firefox Browsec add-on ID: ${installedId}`);
       }
-      await sleep(1_500);
+      await sleep(1_000);
     }
     return driver;
   }
@@ -172,13 +183,175 @@ if (browserName === "chrome") {
         if (fromRoot) return fromRoot;
       } catch {}
 
-      await sleep(250);
+      await sleep(200);
     }
     throw new Error("Firefox did not persist Browsec's runtime moz-extension UUID in its profile.");
   }
 
-  async function activateBrowsec(driver) {
-    console.log("Activating Browsec through Firefox native extension storage.");
+  async function prepareAndActivateBrowsec(driver) {
+    console.log("Preparing Browsec through Firefox native extension storage.");
+    await driver.setContext("chrome");
+    let result;
+    try {
+      result = await driver.executeAsyncScript(`
+        const extensionId = arguments[0];
+        const country = arguments[1];
+        const acceptedShownKey = arguments[2];
+        const acceptPhaseKey = arguments[3];
+        const done = arguments[arguments.length - 1];
+
+        (async () => {
+          const { ExtensionParent } = ChromeUtils.importESModule(
+            'resource://gre/modules/ExtensionParent.sys.mjs'
+          );
+          const { ExtensionStorage } = ChromeUtils.importESModule(
+            'resource://gre/modules/ExtensionStorage.sys.mjs'
+          );
+          const { ExtensionStorageIDB } = ChromeUtils.importESModule(
+            'resource://gre/modules/ExtensionStorageIDB.sys.mjs'
+          );
+
+          let extension;
+          for (let attempt = 0; attempt < 40; attempt += 1) {
+            extension = ExtensionParent.GlobalManager.getExtension(extensionId);
+            if (extension) break;
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+          if (!extension) throw new Error('Browsec extension is not active in Firefox');
+
+          const selected = await ExtensionStorageIDB.selectBackend({ extension });
+          let db = null;
+          let backend;
+
+          const getKey = async (key) => {
+            if (selected.backendEnabled) return (await db.get(key))?.[key];
+            return ExtensionStorage.get(extension.id, key);
+          };
+
+          const setValues = async (values) => {
+            if (selected.backendEnabled) {
+              const changes = await db.set(values);
+              if (changes) ExtensionStorageIDB.notifyListeners(extension.id, changes);
+              return;
+            }
+            await ExtensionStorage.set(extension.id, values);
+          };
+
+          if (selected.backendEnabled) {
+            const storagePrincipal = ExtensionStorageIDB.getStoragePrincipal(extension);
+            db = await ExtensionStorageIDB.open(
+              storagePrincipal,
+              extension.hasPermission('unlimitedStorage')
+            );
+            backend = 'IndexedDB';
+          } else {
+            backend = 'JSONFile';
+          }
+
+          try {
+            await setValues({
+              [acceptedShownKey]: true,
+              [acceptPhaseKey]: 2
+            });
+
+            let readiness = null;
+            for (let attempt = 0; attempt < 60; attempt += 1) {
+              const serversObject = await getKey('serversObject');
+              const userPac = await getKey('userPac');
+              const countries = serversObject?.countries ?? {};
+              const requested = countries?.[country] ?? null;
+              const freeServers = Array.isArray(requested?.servers) ? requested.servers.length : 0;
+              const availableFreeCountries = Object.entries(countries)
+                .filter(([, value]) => Array.isArray(value?.servers) && value.servers.length > 0)
+                .map(([key]) => key)
+                .sort();
+              readiness = {
+                hasServersObject: Boolean(serversObject),
+                freeServers,
+                availableFreeCountries,
+                userPacReady: Boolean(userPac && Array.isArray(userPac.filters))
+              };
+              if (freeServers > 0 && readiness.userPacReady) break;
+              await new Promise((resolve) => setTimeout(resolve, 400));
+            }
+
+            if (!readiness?.freeServers || !readiness?.userPacReady) {
+              throw new Error(
+                'Browsec did not expose a usable free server list before activation: ' +
+                JSON.stringify(readiness)
+              );
+            }
+
+            const current = await getKey('userPac');
+            const next = {
+              ...current,
+              mode: 'proxy',
+              country,
+              filters: current.filters
+            };
+            await setValues({ userPac: next });
+
+            let applied = null;
+            for (let attempt = 0; attempt < 35; attempt += 1) {
+              const low = await getKey('lowLevelPac');
+              const storedPac = await getKey('userPac');
+              const countryServers = Array.isArray(low?.countries?.[country])
+                ? low.countries[country].length
+                : 0;
+              applied = {
+                mode: storedPac?.mode ?? null,
+                country: storedPac?.country ?? null,
+                globalReturn: low?.globalReturn ?? null,
+                countryServers
+              };
+              if (
+                applied.mode === 'proxy' &&
+                applied.country === country &&
+                applied.globalReturn === country &&
+                applied.countryServers > 0
+              ) {
+                break;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 250));
+            }
+
+            if (
+              applied?.mode !== 'proxy' ||
+              applied?.country !== country ||
+              applied?.globalReturn !== country ||
+              !(applied?.countryServers > 0)
+            ) {
+              throw new Error('Browsec did not generate a usable low-level PAC: ' + JSON.stringify(applied));
+            }
+
+            return { backend, readiness, applied };
+          } finally {
+            db?.close?.();
+          }
+        })()
+          .then((value) => done({ ok: true, ...value }))
+          .catch((error) => done({
+            ok: false,
+            error: String(error?.message ?? error),
+            stack: String(error?.stack ?? '')
+          }));
+      `, FIREFOX_EXTENSION_ID, VPN_COUNTRY, ACCEPTED_SHOWN_KEY, ACCEPT_PHASE_KEY);
+    } finally {
+      await driver.setContext("content").catch(() => {});
+    }
+
+    if (!result?.ok) {
+      throw new Error(
+        `Firefox could not prepare Browsec: ${result?.error ?? "unknown error"}` +
+        (result?.stack ? `\n${result.stack}` : ""),
+      );
+    }
+
+    console.log(`Browsec Firefox prepared: ${JSON.stringify(result)}`);
+    return result;
+  }
+
+  async function readPersistedProxyState(driver) {
     await driver.setContext("chrome");
     let result;
     try {
@@ -196,85 +369,49 @@ if (browserName === "chrome") {
           const { ExtensionStorageIDB } = ChromeUtils.importESModule(
             'resource://gre/modules/ExtensionStorageIDB.sys.mjs'
           );
-
           let extension;
           for (let attempt = 0; attempt < 40; attempt += 1) {
             extension = ExtensionParent.GlobalManager.getExtension(extensionId);
             if (extension) break;
-            await new Promise((resolve) => setTimeout(resolve, 250));
+            await new Promise((resolve) => setTimeout(resolve, 200));
           }
-          if (!extension) throw new Error('Browsec extension is not active in Firefox');
+          if (!extension) throw new Error('Browsec extension is not active after Firefox restart');
 
           const selected = await ExtensionStorageIDB.selectBackend({ extension });
-          let stored;
-          let backend;
-
+          let db = null;
           if (selected.backendEnabled) {
-            const storagePrincipal = ExtensionStorageIDB.getStoragePrincipal(extension);
-            const db = await ExtensionStorageIDB.open(
-              storagePrincipal,
-              extension.hasPermission('unlimitedStorage')
-            );
-            try {
-              stored = await db.get('userPac');
-              const current = stored?.userPac && typeof stored.userPac === 'object'
-                ? stored.userPac
-                : {};
-              const next = {
-                ...current,
-                mode: 'proxy',
-                country,
-                broken: false,
-                filters: Array.isArray(current.filters) ? current.filters : [],
-              };
-              const changes = await db.set({ userPac: next });
-              if (changes) ExtensionStorageIDB.notifyListeners(extension.id, changes);
-              backend = 'IndexedDB';
-              return { backend, next };
-            } finally {
-              db.close?.();
-            }
+            const principal = ExtensionStorageIDB.getStoragePrincipal(extension);
+            db = await ExtensionStorageIDB.open(principal, extension.hasPermission('unlimitedStorage'));
           }
-
-          stored = await ExtensionStorage.get(extension.id, 'userPac');
-          const current = stored?.userPac && typeof stored.userPac === 'object'
-            ? stored.userPac
-            : {};
-          const next = {
-            ...current,
-            mode: 'proxy',
-            country,
-            broken: false,
-            filters: Array.isArray(current.filters) ? current.filters : [],
-          };
-          await ExtensionStorage.set(extension.id, { userPac: next });
-          backend = 'JSONFile';
-          return { backend, next };
+          try {
+            const getKey = async (key) => selected.backendEnabled
+              ? (await db.get(key))?.[key]
+              : ExtensionStorage.get(extension.id, key);
+            const userPac = await getKey('userPac');
+            const low = await getKey('lowLevelPac');
+            return {
+              mode: userPac?.mode ?? null,
+              country: userPac?.country ?? null,
+              globalReturn: low?.globalReturn ?? null,
+              countryServers: Array.isArray(low?.countries?.[country])
+                ? low.countries[country].length
+                : 0
+            };
+          } finally {
+            db?.close?.();
+          }
         })()
-          .then(({ backend, next }) => done({
-            ok: true,
-            backend,
-            mode: next.mode,
-            country: next.country,
-            filters: next.filters.length,
-          }))
-          .catch((error) => done({
-            ok: false,
-            error: String(error?.message ?? error),
-            stack: String(error?.stack ?? ''),
-          }));
+          .then((value) => done({ ok: true, ...value }))
+          .catch((error) => done({ ok: false, error: String(error?.message ?? error) }));
       `, FIREFOX_EXTENSION_ID, VPN_COUNTRY);
     } finally {
       await driver.setContext("content").catch(() => {});
     }
 
     if (!result?.ok) {
-      throw new Error(
-        `Firefox could not persist Browsec proxy state: ${result?.error ?? "unknown error"}` +
-        (result?.stack ? `\n${result.stack}` : "")
-      );
+      throw new Error(`Unable to inspect Browsec after Firefox restart: ${result?.error ?? "unknown error"}`);
     }
-    console.log(`Browsec Firefox proxy state saved through ${result.backend}: ${JSON.stringify(result)}`);
+    return result;
   }
 
   async function persistRuntimeProfile(driver) {
@@ -296,13 +433,14 @@ if (browserName === "chrome") {
 
   let driver = await buildDriver();
   let vpnIp;
+  let applied;
   try {
     const uuid = await resolveFirefoxExtensionUuid(driver);
     console.log(`Resolved Firefox Browsec runtime UUID: ${uuid}`);
-    await activateBrowsec(driver);
-    vpnIp = await waitForChangedIp(driver, baselineIp, 20);
+    applied = await prepareAndActivateBrowsec(driver);
+    vpnIp = await waitForChangedIp(driver, baselineIp, 4);
     if (!vpnIp || vpnIp === baselineIp) {
-      throw new Error(`${PROVIDER} did not change the Firefox public IP.`);
+      throw new Error(`${PROVIDER} generated a Firefox PAC but did not change the browser public IP.`);
     }
     console.log(`${PROVIDER} changed the Firefox public IP to ${vpnIp}.`);
     await persistRuntimeProfile(driver);
@@ -312,8 +450,18 @@ if (browserName === "chrome") {
 
   driver = await buildDriver({ restart: true });
   let restartIp;
+  let restartState;
   try {
-    restartIp = await waitForChangedIp(driver, baselineIp, 20);
+    restartState = await readPersistedProxyState(driver);
+    if (
+      restartState.mode !== "proxy" ||
+      restartState.country !== VPN_COUNTRY ||
+      restartState.globalReturn !== VPN_COUNTRY ||
+      !(restartState.countryServers > 0)
+    ) {
+      throw new Error(`${PROVIDER} proxy state did not survive Firefox restart: ${JSON.stringify(restartState)}`);
+    }
+    restartIp = await waitForChangedIp(driver, baselineIp, 4);
     if (!restartIp || restartIp === baselineIp) {
       throw new Error(`${PROVIDER} did not remain active after a Firefox restart.`);
     }
@@ -322,17 +470,23 @@ if (browserName === "chrome") {
     await driver.quit().catch(() => {});
   }
 
-  await writeFile(statusPath, `${JSON.stringify({
-    provider: PROVIDER,
-    browser: "firefox",
-    country: VPN_COUNTRY,
-    verified: true,
-    restartVerified: true,
-    baselineIp,
-    vpnIp,
-    restartIp,
-    verifiedAt: new Date().toISOString(),
-  }, null, 2)}\n`, "utf8");
+  await writeFile(
+    statusPath,
+    `${JSON.stringify({
+      provider: PROVIDER,
+      browser: "firefox",
+      country: VPN_COUNTRY,
+      verified: true,
+      restartVerified: true,
+      baselineIp,
+      vpnIp,
+      restartIp,
+      storageBackend: applied?.backend ?? null,
+      restartState,
+      verifiedAt: new Date().toISOString(),
+    }, null, 2)}\n`,
+    "utf8",
+  );
 
   console.log(`${PROVIDER} is active and restart-persistent in Firefox: ${baselineIp} -> ${restartIp}`);
 }
