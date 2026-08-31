@@ -7,17 +7,7 @@ if (!["chrome", "firefox"].includes(browserName)) {
 }
 
 if (browserName === "chrome") {
-  const chromeSourceUrl = new URL("./prepare-private-vpn-chrome.mjs", import.meta.url);
-  const original = await readFile(chromeSourceUrl, "utf8");
-  const restartPopup = `  extensionId = (await readFile(extensionIdPath, "utf8")).trim();\n  await openPopup(driver, extensionId);\n  restartIp = await waitForChangedIp(driver, baselineIp, 12);`;
-  const restartIpOnly = `  extensionId = (await readFile(extensionIdPath, "utf8")).trim();\n  // The extension popup is intentionally blocked by ChromeDriver after restart.\n  // Persistence is proved by reopening the same profile and verifying that its\n  // outward IP is still routed through Browsec.\n  restartIp = await waitForChangedIp(driver, baselineIp, 12);`;
-  const patched = original.replace(restartPopup, restartIpOnly);
-  if (patched === original) {
-    throw new Error("Unable to patch the Chrome Browsec restart verifier.");
-  }
-  const patchedChromeUrl = new URL("./.prepare-private-vpn-chrome-runtime.mjs", import.meta.url);
-  await writeFile(patchedChromeUrl, patched, "utf8");
-  await import(`${patchedChromeUrl.href}?run=${Date.now()}`);
+  await import("./prepare-private-vpn-chrome.mjs");
 } else {
   const firefoxExtensionId = process.env.BROWSEC_FIREFOX_EXTENSION_ID ?? "browsec@browsec.com";
   const profileRoot = process.env.PRIVATE_BROWSER_PROFILE_ROOT ?? "/tmp/private-browser-profile";
