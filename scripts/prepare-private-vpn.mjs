@@ -124,7 +124,15 @@ async function acceptTerms(page) {
 
   try {
     const text = await bodyText(page);
-    if (!/terms(?: and conditions)?|privacy policy|accept|agree|consent/i.test(text)) {
+    const directAccept = page.locator(
+      'input[value="Accept" i], input[value="Agree" i]',
+    ).first();
+    const hasDirectAccept = await directAccept.isVisible().catch(() => false);
+
+    if (
+      !hasDirectAccept &&
+      !/terms(?: of service| and conditions)?|privacy policy|accept|agree|consent/i.test(text)
+    ) {
       return false;
     }
 
@@ -148,7 +156,12 @@ async function acceptTerms(page) {
 
     if (page.isClosed()) return changed;
 
-    const acceptNames = /accept|agree|continue|confirm/i;
+    if (hasDirectAccept) {
+      await directAccept.click({ force: true }).catch(() => {});
+      return true;
+    }
+
+    const acceptNames = /accept|agree/i;
     const button = page.getByRole("button", { name: acceptNames }).first();
     if (await button.isVisible().catch(() => false)) {
       await button.click({ force: true }).catch(() => {});
@@ -195,11 +208,6 @@ async function openPopup(context) {
     try {
       await page.goto(popupUrl, { waitUntil: "domcontentloaded", timeout: 5_000 });
       if (!page.isClosed() && page.url().startsWith(popupUrl)) {
-        await page.waitForFunction(
-          () => (document.body?.innerText ?? "").trim().length > 0,
-          undefined,
-          { timeout: 8_000 },
-        ).catch(() => {});
         await page.waitForTimeout(750);
         return page;
       }
@@ -272,8 +280,6 @@ async function startVpn(context) {
 
     try {
       page = await openPopup(context);
-      if (await isVpnConnected(page)) return;
-
       await acceptTerms(page);
       if (page.isClosed()) {
         await new Promise((resolve) => setTimeout(resolve, 750));
@@ -355,6 +361,7 @@ if (browserName === "firefox") {
     "browser.shell.checkDefaultBrowser": false,
     "extensions.autoDisableScopes": 0,
     "extensions.enabledScopes": 15,
+    "extensions.startupScanScopes": 15,
     "extensions.webextensions.uuids": JSON.stringify({
       [FIREFOX_EXTENSION_ID]: FIREFOX_EXTENSION_UUID,
     }),
