@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import path from "node:path";
 
@@ -114,6 +113,8 @@ runtimeSource = runtimeSource.replace(
   `      const current = await driver.getCurrentUrl();\n      if (current.startsWith(target)) return;\n      const text = await bodyText(driver);\n      if (/ERR_BLOCKED_BY_CLIENT|has been blocked by Chrome/i.test(text)) {\n        throw new Error("Chrome reports the extension page is blocked/unavailable.");\n      }`,
 );
 
-const patchedRuntimePath = path.join(diagnosticsDirectory, "prepare-private-vpn-runtime.patched.mjs");
-await writeFile(patchedRuntimePath, runtimeSource, "utf8");
-await import(pathToFileURL(patchedRuntimePath).href);
+// Keep the generated module next to the source module so createRequire(import.meta.url)
+// resolves selenium-webdriver from this repository's node_modules rather than /tmp.
+const patchedRuntimeUrl = new URL("./.prepare-private-vpn-runtime.patched.mjs", import.meta.url);
+await writeFile(patchedRuntimeUrl, runtimeSource, "utf8");
+await import(`${patchedRuntimeUrl.href}?run=${Date.now()}`);
