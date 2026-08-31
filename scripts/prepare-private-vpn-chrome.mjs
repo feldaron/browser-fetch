@@ -488,7 +488,6 @@ driver = await buildDriver({ restart: true });
 let restartIp;
 try {
   extensionId = (await readFile(extensionIdPath, "utf8")).trim();
-  await openPopup(driver, extensionId);
   restartIp = await waitForChangedIp(driver, baselineIp, 12);
   if (!restartIp || restartIp === baselineIp) {
     await saveDiagnostics(driver, "restart-ip-unchanged").catch(() => {});
