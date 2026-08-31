@@ -68,8 +68,13 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$PRIVATE_BROWSER" == "firefox" ]]; then
+            extension_dir="$PRIVATE_BROWSER_PROFILE_ROOT/firefox/extensions"
             distribution_dir="$(dirname "$PRIVATE_BROWSER_EXECUTABLE")/distribution"
-            mkdir -p "$distribution_dir"
+            mkdir -p "$extension_dir" "$distribution_dir"
+            curl --fail --location --silent --show-error \
+              --output "$extension_dir/browsec@browsec.com.xpi" \
+              https://addons.mozilla.org/firefox/downloads/latest/browsec/latest.xpi
+            test -s "$extension_dir/browsec@browsec.com.xpi"
             cat > "$distribution_dir/policies.json" <<'JSON'
           {
             "policies": {
