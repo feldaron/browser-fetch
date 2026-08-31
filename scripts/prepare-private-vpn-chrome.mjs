@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 
@@ -11,6 +11,7 @@ const profileDirectory = path.join(profileRoot, "chrome");
 const statusPath = process.env.PRIVATE_BROWSER_VPN_STATUS ?? "/tmp/private-browser/vpn-status.json";
 const diagnosticsDirectory = path.dirname(statusPath);
 const devToolsActivePortPath = path.join(profileDirectory, "DevToolsActivePort");
+const extensionInstallRoot = path.join(profileDirectory, "Default", "Extensions", EXTENSION_ID);
 
 await Promise.all([mkdir(profileDirectory, { recursive: true }), mkdir(diagnosticsDirectory, { recursive: true })]);
 
@@ -34,7 +35,7 @@ async function fetchIpOutsideBrowser() {
   for (const endpoint of ["https://api.ipify.org?format=json", "https://ifconfig.co/ip", "https://icanhazip.com/"]) {
     try {
       const response = await fetch(endpoint, {
-        headers: { "user-agent": "LaptopValue-private-browser-vpn-check/7.0" },
+        headers: { "user-agent": "LaptopValue-private-browser-vpn-check/8.0" },
         signal: AbortSignal.timeout(10_000),
       });
       if (!response.ok) continue;
@@ -158,6 +159,40 @@ async function stopChrome(session) {
   await sleep(800);
 }
 
+async function resolveManagedExtension() {
+  let lastDetail = "extension directory not created";
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    try {
+      const entries = (await readdir(extensionInstallRoot, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+      lastDetail = entries.length ? `versions found: ${entries.join(", ")}` : "extension directory is empty";
+      for (const version of entries) {
+        try {
+          const manifestPath = path.join(extensionInstallRoot, version, "manifest.json");
+          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          const popupPath = manifest?.action?.default_popup ?? manifest?.browser_action?.default_popup;
+          if (typeof popupPath === "string" && popupPath.trim()) {
+            const normalizedPopup = popupPath.replace(/^\/+/, "");
+            return {
+              version: String(manifest.version ?? version),
+              manifestVersion: manifest.manifest_version,
+              popupPath: normalizedPopup,
+              popupUrl: `chrome-extension://${EXTENSION_ID}/${normalizedPopup}`,
+            };
+          }
+          lastDetail = `Browsec ${manifest?.version ?? version} manifest has no action default_popup`;
+        } catch (error) {
+          lastDetail = `could not read installed manifest: ${error?.message ?? error}`;
+        }
+      }
+    } catch {}
+    await sleep(500);
+  }
+  throw new Error(`Managed Browsec was not ready in the Chrome profile after 30 seconds (${lastDetail}).`);
+}
+
 const acceptTermsExpression = `(() => {
   const nodes=[]; const visit=(root)=>{for(const e of root.querySelectorAll('*')){nodes.push(e);if(e.shadowRoot)visit(e.shadowRoot)}}; visit(document);
   const label=(e)=>[e.innerText,e.textContent,e.getAttribute('aria-label'),e.getAttribute('title'),e.getAttribute('value')].filter(Boolean).join(' ').replace(/\\s+/g,' ').trim();
@@ -183,23 +218,23 @@ async function acceptTermsEverywhere(port) {
   }
 }
 
-async function openPopup(port) {
-  const popupUrl = `chrome-extension://${EXTENSION_ID}/popup/popup.html`;
+async function openPopup(port, popupUrl) {
   let lastError;
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     await acceptTermsEverywhere(port);
     let target;
     try {
       target = await createTarget(port, popupUrl);
-      await sleep(600);
+      await sleep(500);
       const href = await evaluate(target, "location.href");
       const text = await evaluate(target, "document.body ? document.body.innerText : ''");
       if (typeof href === "string" && href.startsWith(popupUrl) && !/ERR_BLOCKED_BY_CLIENT|not found|problem loading page/i.test(String(text))) return target;
+      lastError = new Error(`Browsec popup loaded unexpected content at ${href ?? "unknown URL"}.`);
     } catch (error) { lastError = error; }
     if (target?.id) await closeTarget(port, target.id);
-    await sleep(1_000);
+    await sleep(500);
   }
-  throw lastError ?? new Error("The managed Browsec extension did not become available in normal Chrome.");
+  throw lastError ?? new Error("The installed Browsec popup did not become available in normal Chrome.");
 }
 
 async function fetchIpThroughChrome(port) {
@@ -207,7 +242,7 @@ async function fetchIpThroughChrome(port) {
     let target;
     try {
       target = await createTarget(port, endpoint);
-      for (let attempt = 0; attempt < 20; attempt += 1) {
+      for (let attempt = 0; attempt < 12; attempt += 1) {
         await sleep(250);
         const ip = extractIp(await evaluate(target, "document.body ? document.body.innerText : ''").catch(() => ""));
         if (ip) return ip;
@@ -217,31 +252,32 @@ async function fetchIpThroughChrome(port) {
   return undefined;
 }
 
-async function waitForChangedIp(port, baseline, attempts = 15) {
+async function waitForChangedIp(port, baseline, attempts = 10) {
   let latest;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     latest = await fetchIpThroughChrome(port).catch(() => undefined);
     if (latest && latest !== baseline) return latest;
-    await sleep(1_000);
+    await sleep(750);
   }
   return latest;
 }
 
-async function activateBrowsec(session, baselineIp) {
-  for (let cycle = 0; cycle < 6; cycle += 1) {
+async function activateBrowsec(session, baselineIp, popupUrl) {
+  for (let cycle = 0; cycle < 3; cycle += 1) {
     await acceptTermsEverywhere(session.port);
-    let popup = await openPopup(session.port);
-    await evaluate(popup, acceptTermsExpression).catch(() => {});
-    await sleep(800);
+    let popup = await openPopup(session.port, popupUrl);
+    const terms = await evaluate(popup, acceptTermsExpression).catch(() => ({ relevant: false }));
+    console.log(`${PROVIDER} managed-extension terms pass ${cycle + 1}: ${JSON.stringify(terms)}`);
+    await sleep(700);
     if (popup.id) await closeTarget(session.port, popup.id);
     const alreadyChanged = await waitForChangedIp(session.port, baselineIp, 2);
     if (alreadyChanged && alreadyChanged !== baselineIp) return alreadyChanged;
-    popup = await openPopup(session.port);
-    const result = await evaluate(popup, activationExpression).catch(() => ({ clicked: false }));
-    console.log(`${PROVIDER} managed-extension activation: ${JSON.stringify(result)}`);
+    popup = await openPopup(session.port, popupUrl);
+    const result = await evaluate(popup, activationExpression).catch((error) => ({ clicked: false, error: String(error?.message ?? error) }));
+    console.log(`${PROVIDER} managed-extension activation ${cycle + 1}: ${JSON.stringify(result)}`);
     if (popup.id) await closeTarget(session.port, popup.id);
-    await sleep(1_500);
-    const changed = await waitForChangedIp(session.port, baselineIp, 5);
+    await sleep(1_200);
+    const changed = await waitForChangedIp(session.port, baselineIp, 4);
     if (changed && changed !== baselineIp) return changed;
   }
   return undefined;
@@ -251,8 +287,11 @@ const baselineIp = await fetchIpOutsideBrowser();
 console.log(`Runner public IP before ${PROVIDER}: ${baselineIp}`);
 let session = await launchNormalChrome();
 let vpnIp;
+let extensionInfo;
 try {
-  vpnIp = await activateBrowsec(session, baselineIp);
+  extensionInfo = await resolveManagedExtension();
+  console.log(`Managed Browsec installed: ${JSON.stringify(extensionInfo)}`);
+  vpnIp = await activateBrowsec(session, baselineIp, extensionInfo.popupUrl);
   if (!vpnIp || vpnIp === baselineIp) throw new Error(`${PROVIDER} did not change the managed normal Chrome public IP.`);
   console.log(`${PROVIDER} changed the managed normal Chrome public IP to ${vpnIp}.`);
 } finally { await stopChrome(session); }
@@ -260,10 +299,12 @@ try {
 session = await launchNormalChrome();
 let restartIp;
 try {
-  restartIp = await waitForChangedIp(session.port, baselineIp, 18);
+  const restartedExtension = await resolveManagedExtension();
+  console.log(`Managed Browsec survived normal Chrome restart: ${JSON.stringify(restartedExtension)}`);
+  restartIp = await waitForChangedIp(session.port, baselineIp, 10);
   if (!restartIp || restartIp === baselineIp) throw new Error(`${PROVIDER} did not remain active after a normal Chrome restart.`);
   console.log(`${PROVIDER} remained active after normal Chrome restart: ${restartIp}.`);
 } finally { await stopChrome(session); }
 
-await writeFile(statusPath, `${JSON.stringify({provider:PROVIDER,browser:"chrome",verified:true,restartVerified:true,extensionId:EXTENSION_ID,baselineIp,vpnIp,restartIp,verifiedAt:new Date().toISOString()}, null, 2)}\n`, "utf8");
+await writeFile(statusPath, `${JSON.stringify({provider:PROVIDER,browser:"chrome",verified:true,restartVerified:true,extensionId:EXTENSION_ID,extensionVersion:extensionInfo.version,baselineIp,vpnIp,restartIp,verifiedAt:new Date().toISOString()}, null, 2)}\n`, "utf8");
 console.log(`${PROVIDER} is active and restart-persistent in chrome: ${baselineIp} -> ${restartIp}`);
