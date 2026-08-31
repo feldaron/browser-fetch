@@ -11,12 +11,10 @@ const vpnRuntimePath = new URL("../scripts/prepare-private-vpn-runtime.mjs", imp
 
 test("private browser defaults to Firefox and gates exposure on a verified VPN", async () => {
   const workflow = await readFile(workflowPath, "utf8");
-
   assert.match(workflow, /default: firefox/);
   assert.match(workflow, /Stage Browsec VPN extension/);
   assert.match(workflow, /Install, activate and verify Browsec VPN/);
   assert.match(workflow, /restartVerified == true/);
-
   const verifyPosition = workflow.indexOf("Install, activate and verify Browsec VPN");
   const tunnelPosition = workflow.indexOf("Connect privatebrowser.laptopvalue.co.uk");
   assert.ok(verifyPosition >= 0 && tunnelPosition > verifyPosition);
@@ -29,7 +27,6 @@ test("Firefox stages the official add-on and resolves its runtime origin without
     readFile(vpnSetupPath, "utf8"),
     readFile(vpnRuntimePath, "utf8"),
   ]);
-
   assert.match(workflow, /addons\.mozilla\.org\/api\/v5\/addons\/addon\/browsec/);
   assert.match(workflow, /BROWSEC_FIREFOX_EXTENSION_ID/);
   assert.match(launcher, /BROWSEC_FIREFOX_EXTENSION_ID/);
@@ -40,21 +37,22 @@ test("Firefox stages the official add-on and resolves its runtime origin without
   assert.match(vpnRuntime, /restart-persistent/);
 });
 
-test("Chrome uses WebDriver BiDi rather than managed-policy or legacy packed-extension injection", async () => {
+test("Chrome uses a managed Web Store install in the same persistent normal profile used by the session", async () => {
   const [workflow, smokeWorkflow, vpnSetup, vpnChrome] = await Promise.all([
     readFile(workflowPath, "utf8"),
     readFile(smokeWorkflowPath, "utf8"),
     readFile(vpnSetupPath, "utf8"),
     readFile(vpnChromePath, "utf8"),
   ]);
-
   assert.match(vpnSetup, /prepare-private-vpn-chrome\.mjs/);
-  assert.match(vpnChrome, /clients2\.google\.com\/service\/update2\/crx/);
-  assert.match(vpnChrome, /webExtension\.install/);
-  assert.match(vpnChrome, /enableBidi/);
-  assert.match(vpnChrome, /--enable-unsafe-extension-debugging/);
-  assert.match(vpnChrome, /restart-persistent/);
-  assert.doesNotMatch(workflow, /ExtensionSettings/);
-  assert.doesNotMatch(smokeWorkflow, /ExtensionSettings/);
-  assert.match(smokeWorkflow, /prepare-private-vpn-chrome\.mjs/);
+  assert.match(workflow, /ExtensionSettings/);
+  assert.match(smokeWorkflow, /ExtensionSettings/);
+  assert.match(workflow, /omghfjlpggmjjaagoclmmobgdodcjboh/);
+  assert.match(smokeWorkflow, /omghfjlpggmjjaagoclmmobgdodcjboh/);
+  assert.match(vpnChrome, /--remote-debugging-port=0/);
+  assert.match(vpnChrome, /chrome-extension:\/\/\$\{EXTENSION_ID\}\/popup\/popup\.html/);
+  assert.match(vpnChrome, /normal Chrome public IP/);
+  assert.match(vpnChrome, /normal Chrome restart/);
+  assert.doesNotMatch(vpnChrome, /webExtension\.install/);
+  assert.doesNotMatch(vpnChrome, /enableBidi/);
 });
