@@ -110,7 +110,7 @@ jobs:
           npm install --ignore-scripts --no-audit --no-fund
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            xvfb openbox x11vnc novnc websockify
+            xvfb openbox x11vnc novnc websockify unzip
 
       - name: Resolve selected browser and WebDriver
         id: browser
@@ -174,18 +174,7 @@ jobs:
             test -s "$extension_dir/$extension_id.xpi"
             echo "BROWSEC_FIREFOX_EXTENSION_ID=$extension_id" >> "$GITHUB_ENV"
           else
-            sudo mkdir -p /etc/opt/chrome/policies/managed
-            sudo tee /etc/opt/chrome/policies/managed/private-browser-vpn.json > /dev/null <<'JSON'
-          {
-            "ExtensionSettings": {
-              "omghfjlpggmjjaagoclmmobgdodcjboh": {
-                "installation_mode": "force_installed",
-                "update_url": "https://clients2.google.com/service/update2/crx",
-                "toolbar_pin": "force_pinned"
-              }
-            }
-          }
-          JSON
+            echo "Chrome Browsec is downloaded and installed by WebDriver BiDi during verification."
           fi
 
       - name: Install cloudflared
