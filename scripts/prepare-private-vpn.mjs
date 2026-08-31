@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import path from "node:path";
 
@@ -54,4 +55,64 @@ if (browserName === "firefox") {
   throw new Error(`Unsupported private browser: ${browserName}`);
 }
 
-await import("./prepare-private-vpn-runtime.mjs");
+// Firefox 154 no longer allows the old privileged resource:// Services import from
+// a WebDriver executeScript call. Chrome 151 can also render extension subresource
+// errors inside a successfully loaded extension page. Apply these narrow runtime
+// compatibility fixes without weakening the fail-closed public-IP verification.
+const runtimeSourcePath = new URL("./prepare-private-vpn-runtime.mjs", import.meta.url);
+let runtimeSource = await readFile(runtimeSourcePath, "utf8");
+
+runtimeSource = runtimeSource.replace(
+  /async function resolveFirefoxExtensionUuid\(driver\) \{[\s\S]*?\n\}\n\nfunction popupUrl\(\)/,
+  `async function resolveFirefoxExtensionUuid(driver) {
+  const capabilities = await driver.getCapabilities();
+  const runtimeProfile = capabilities.get("moz:profile");
+  if (!runtimeProfile || typeof runtimeProfile !== "string") {
+    throw new Error("Firefox WebDriver did not report its runtime profile path.");
+  }
+
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    try {
+      const extensions = JSON.parse(await readFile(path.join(runtimeProfile, "extensions.json"), "utf8"));
+      const addon = extensions?.addons?.find((entry) => entry?.id === FIREFOX_EXTENSION_ID);
+      const rootUri = addon?.rootURI ?? addon?.rootUri;
+      const match = typeof rootUri === "string"
+        ? rootUri.match(/^moz-extension:\/\/([^/]+)\//)
+        : null;
+      if (match?.[1]) {
+        firefoxExtensionUuid = match[1];
+        console.log(\`Resolved Firefox Browsec runtime UUID from profile: \${firefoxExtensionUuid}\`);
+        return;
+      }
+
+      const prefs = await readFile(path.join(runtimeProfile, "prefs.js"), "utf8").catch(() => "");
+      const prefMatch = prefs.match(/user_pref\\("extensions\\.webextensions\\.uuids",\\s*"((?:\\\\.|[^"\\\\])*)"\\);/);
+      if (prefMatch?.[1]) {
+        const decoded = JSON.parse(\`"\${prefMatch[1]}"\`);
+        const uuids = JSON.parse(decoded);
+        if (typeof uuids?.[FIREFOX_EXTENSION_ID] === "string") {
+          firefoxExtensionUuid = uuids[FIREFOX_EXTENSION_ID];
+          console.log(\`Resolved Firefox Browsec runtime UUID from prefs: \${firefoxExtensionUuid}\`);
+          return;
+        }
+      }
+    } catch {
+      // Firefox may still be flushing extension metadata to the profile.
+    }
+    await sleep(500);
+  }
+
+  throw new Error("Firefox did not expose Browsec's runtime extension UUID in its profile.");
+}
+
+function popupUrl()`,
+);
+
+runtimeSource = runtimeSource.replace(
+  `      const current = await driver.getCurrentUrl();\n      const text = await bodyText(driver);\n      if (/ERR_BLOCKED_BY_CLIENT|has been blocked by Chrome/i.test(text)) {\n        throw new Error("Chrome reports the extension page is blocked/unavailable.");\n      }\n      if (current.startsWith(target)) return;`,
+  `      const current = await driver.getCurrentUrl();\n      if (current.startsWith(target)) return;\n      const text = await bodyText(driver);\n      if (/ERR_BLOCKED_BY_CLIENT|has been blocked by Chrome/i.test(text)) {\n        throw new Error("Chrome reports the extension page is blocked/unavailable.");\n      }`,
+);
+
+const patchedRuntimePath = path.join(diagnosticsDirectory, "prepare-private-vpn-runtime.patched.mjs");
+await writeFile(patchedRuntimePath, runtimeSource, "utf8");
+await import(pathToFileURL(patchedRuntimePath).href);
