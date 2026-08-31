@@ -4,13 +4,19 @@ import { isIP } from "node:net";
 import path from "node:path";
 
 const PROVIDER = "Browsec";
-const EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh";
+const STORE_EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh";
+const VPN_COUNTRY = (process.env.PRIVATE_BROWSER_VPN_COUNTRY ?? "uk").toLowerCase();
 const executable = process.env.PRIVATE_BROWSER_EXECUTABLE ?? "google-chrome";
 const profileRoot = process.env.PRIVATE_BROWSER_PROFILE_ROOT ?? "/tmp/private-browser-profile";
 const profileDirectory = path.join(profileRoot, "chrome");
 const statusPath = process.env.PRIVATE_BROWSER_VPN_STATUS ?? "/tmp/private-browser/vpn-status.json";
 const diagnosticsDirectory = path.dirname(statusPath);
+const crxPath = path.join(diagnosticsDirectory, "browsec-chrome.crx");
+const zipPath = path.join(diagnosticsDirectory, "browsec-chrome.zip");
+const unpackedDirectory = path.join(diagnosticsDirectory, "browsec-chrome-unpacked");
 const devToolsActivePortPath = path.join(profileDirectory, "DevToolsActivePort");
+
+if (!/^[a-z]{2}$/.test(VPN_COUNTRY)) throw new Error(`Invalid Browsec country code: ${VPN_COUNTRY}`);
 
 await Promise.all([
   mkdir(profileDirectory, { recursive: true }),
@@ -37,7 +43,7 @@ async function fetchIpOutsideBrowser() {
   for (const endpoint of ["https://api.ipify.org?format=json", "https://ifconfig.co/ip", "https://icanhazip.com/"]) {
     try {
       const response = await fetch(endpoint, {
-        headers: { "user-agent": "LaptopValue-private-browser-vpn-check/5.0" },
+        headers: { "user-agent": "LaptopValue-private-browser-vpn-check/6.0" },
         signal: AbortSignal.timeout(10_000),
       });
       if (!response.ok) continue;
@@ -46,6 +52,51 @@ async function fetchIpOutsideBrowser() {
     } catch {}
   }
   throw new Error("Unable to determine the runner public IP before enabling the VPN.");
+}
+
+async function downloadAndUnpackOfficialExtension() {
+  const versionProcess = spawn(executable, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+  let versionText = "";
+  versionProcess.stdout?.on("data", (chunk) => { versionText += String(chunk); });
+  versionProcess.stderr?.on("data", (chunk) => { versionText += String(chunk); });
+  await new Promise((resolve, reject) => {
+    versionProcess.once("error", reject);
+    versionProcess.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`Chrome --version exited ${code}`)));
+  });
+  const version = versionText.match(/\d+\.\d+\.\d+\.\d+/)?.[0];
+  if (!version) throw new Error(`Unable to determine Chrome version from: ${versionText.trim()}`);
+
+  const params = new URLSearchParams({
+    response: "redirect",
+    prodversion: version,
+    acceptformat: "crx2,crx3",
+    x: `id=${STORE_EXTENSION_ID}&uc`,
+  });
+  const response = await fetch(`https://clients2.google.com/service/update2/crx?${params}`, {
+    redirect: "follow",
+    headers: { "user-agent": `Mozilla/5.0 Chrome/${version}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`Unable to download Browsec CRX: HTTP ${response.status}`);
+
+  const crx = Buffer.from(await response.arrayBuffer());
+  const zipOffset = crx.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+  if (zipOffset < 0 || crx.length - zipOffset < 1_000) {
+    throw new Error("Downloaded Browsec CRX did not contain a valid ZIP payload.");
+  }
+
+  await writeFile(crxPath, crx);
+  await writeFile(zipPath, crx.subarray(zipOffset));
+  await rm(unpackedDirectory, { recursive: true, force: true });
+  await mkdir(unpackedDirectory, { recursive: true });
+
+  const unzip = spawn("unzip", ["-q", "-o", zipPath, "-d", unpackedDirectory], { stdio: "inherit" });
+  await new Promise((resolve, reject) => {
+    unzip.once("error", reject);
+    unzip.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`unzip exited ${code}`)));
+  });
+  JSON.parse(await readFile(path.join(unpackedDirectory, "manifest.json"), "utf8"));
+  console.log(`Downloaded and unpacked official Browsec Chrome package (${crx.length} bytes).`);
 }
 
 class CdpClient {
@@ -110,13 +161,18 @@ async function closeTarget(port, id) {
   await fetch(`http://127.0.0.1:${port}/json/close/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(5_000) }).catch(() => {});
 }
 
-async function evaluate(target, expression) {
+async function evaluate(target, expression, awaitPromise = false) {
   if (!target?.webSocketDebuggerUrl) throw new Error("Chrome target has no DevTools websocket URL.");
   const client = new CdpClient(target.webSocketDebuggerUrl);
   await client.connect();
   try {
-    const result = await client.command("Runtime.evaluate", { expression, returnByValue: true, userGesture: true });
-    if (result.exceptionDetails) throw new Error(result.exceptionDetails.text ?? "Chrome page evaluation failed.");
+    const result = await client.command("Runtime.evaluate", {
+      expression,
+      returnByValue: true,
+      userGesture: true,
+      awaitPromise,
+    });
+    if (result.exceptionDetails) throw new Error(result.exceptionDetails.text ?? "Chrome target evaluation failed.");
     return result.result?.value;
   } finally { client.close(); }
 }
@@ -125,6 +181,7 @@ async function launchNormalChrome() {
   await rm(devToolsActivePortPath, { force: true }).catch(() => {});
   const browser = spawn(executable, [
     `--user-data-dir=${profileDirectory}`,
+    `--load-extension=${unpackedDirectory}`,
     "--remote-debugging-port=0",
     "--remote-allow-origins=*",
     "--no-first-run",
@@ -161,49 +218,43 @@ async function stopChrome(session) {
   await sleep(800);
 }
 
-const acceptTermsExpression = `(() => {
-  const nodes=[]; const visit=(root)=>{for(const e of root.querySelectorAll('*')){nodes.push(e);if(e.shadowRoot)visit(e.shadowRoot)}}; visit(document);
-  const label=(e)=>[e.innerText,e.textContent,e.getAttribute('aria-label'),e.getAttribute('title'),e.getAttribute('value')].filter(Boolean).join(' ').replace(/\\s+/g,' ').trim();
-  const text=nodes.map(label).join(' '); if(!/(terms|privacy policy|privacy notice|consent)/i.test(text)) return {relevant:false};
-  let toggled=0; for(const e of nodes){const type=e.getAttribute('type'),role=e.getAttribute('role'),tag=e.tagName.toLowerCase();const toggle=type==='checkbox'||role==='checkbox'||role==='switch'||tag==='c-switch';if(!toggle)continue;const checked=(type==='checkbox'&&'checked'in e)?Boolean(e.checked):e.getAttribute('aria-checked')==='true'||/(^|[\\s_-])(on|active|checked|enabled)([\\s_-]|$)/i.test(String(e.className||''));if(!checked){e.click();toggled++}}
-  const accept=nodes.find((e)=>{const t=label(e);const clickable=['BUTTON','A','LABEL','INPUT'].includes(e.tagName)||['button','link'].includes(e.getAttribute('role'));return clickable&&/^(accept|agree|continue|confirm)(\\b|\\s|$)/i.test(t)});
-  if(accept&&!accept.disabled&&accept.getAttribute('aria-disabled')!=='true'){accept.click();return {relevant:true,clicked:true,toggled}} return {relevant:true,clicked:false,toggled};
-})()`;
-
-const activationExpression = `(() => {
-  const nodes=[]; const visit=(root)=>{for(const e of root.querySelectorAll('*')){nodes.push(e);if(e.shadowRoot)visit(e.shadowRoot)}}; visit(document);
-  const label=(e)=>[e.innerText,e.textContent,e.getAttribute('aria-label'),e.getAttribute('title'),e.getAttribute('value')].filter(Boolean).join(' ').replace(/\\s+/g,' ').trim();
-  const action=nodes.find((e)=>{const t=label(e);const clickable=['BUTTON','A','LABEL','INPUT'].includes(e.tagName)||['button','link'].includes(e.getAttribute('role'));return clickable&&/^(start vpn|protect me|turn on|connect)(\\b|\\s|$)/i.test(t)});if(action){action.click();return {clicked:true,control:'text',label:label(action)}}
-  const sw=nodes.filter((e)=>e.tagName.toLowerCase()==='c-switch'||e.getAttribute('role')==='switch').at(-1);if(sw){sw.click();return {clicked:true,control:'switch',label:label(sw)}}
-  const off=nodes.find((e)=>/^off$/i.test(label(e)));if(off){off.click();return {clicked:true,control:'off-label',label:label(off)}} return {clicked:false};
-})()`;
-
-async function acceptTermsEverywhere(port) {
-  const targets = await listTargets(port).catch(() => []);
-  for (const target of targets) {
-    if (!target.webSocketDebuggerUrl) continue;
-    if (!target.url?.startsWith(`chrome-extension://${EXTENSION_ID}/`) && !/https?:\/\/([^.]+\.)*browsec\.com\//i.test(target.url ?? "")) continue;
-    await evaluate(target, acceptTermsExpression).catch(() => {});
+async function resolveExtensionTarget(port) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const targets = await listTargets(port).catch(() => []);
+    const target = targets.find((entry) =>
+      typeof entry?.url === "string" &&
+      /^chrome-extension:\/\/[^/]+\//.test(entry.url) &&
+      typeof entry.webSocketDebuggerUrl === "string"
+    );
+    if (target) {
+      const extensionId = target.url.match(/^chrome-extension:\/\/([^/]+)\//)?.[1];
+      if (extensionId) return { target, extensionId };
+    }
+    await sleep(500);
   }
+  throw new Error("Chrome did not expose the loaded Browsec extension target.");
 }
 
-async function openPopup(port) {
-  const popupUrl = `chrome-extension://${EXTENSION_ID}/popup/popup.html`;
-  let lastError;
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    await acceptTermsEverywhere(port);
-    let target;
-    try {
-      target = await createTarget(port, popupUrl);
-      await sleep(600);
-      const href = await evaluate(target, "location.href");
-      const text = await evaluate(target, "document.body ? document.body.innerText : ''");
-      if (typeof href === "string" && href.startsWith(popupUrl) && !/ERR_BLOCKED_BY_CLIENT|not found|problem loading page/i.test(String(text))) return target;
-    } catch (error) { lastError = error; }
-    if (target?.id) await closeTarget(port, target.id);
-    await sleep(1_000);
-  }
-  throw lastError ?? new Error("Browsec did not become available in normal Chrome.");
+async function activateBrowsec(session) {
+  const { target, extensionId } = await resolveExtensionTarget(session.port);
+  const result = await evaluate(target, `
+    (async () => {
+      const stored = await chrome.storage.local.get('userPac');
+      const current = stored?.userPac && typeof stored.userPac === 'object' ? stored.userPac : {};
+      const next = {
+        ...current,
+        mode: 'proxy',
+        country: ${JSON.stringify(VPN_COUNTRY)},
+        broken: false,
+        filters: Array.isArray(current.filters) ? current.filters : [],
+      };
+      await chrome.storage.local.set({ userPac: next });
+      return { ok: true, mode: next.mode, country: next.country, filters: next.filters.length };
+    })()
+  `, true);
+  if (!result?.ok) throw new Error("Chrome could not persist Browsec proxy state.");
+  console.log(`Browsec Chrome proxy state saved for ${extensionId}: ${JSON.stringify(result)}`);
+  return extensionId;
 }
 
 async function fetchIpThroughChrome(port) {
@@ -221,7 +272,7 @@ async function fetchIpThroughChrome(port) {
   return undefined;
 }
 
-async function waitForChangedIp(port, baseline, attempts = 15) {
+async function waitForChangedIp(port, baseline, attempts = 20) {
   let latest;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     latest = await fetchIpThroughChrome(port).catch(() => undefined);
@@ -231,32 +282,16 @@ async function waitForChangedIp(port, baseline, attempts = 15) {
   return latest;
 }
 
-async function activateBrowsec(session, baselineIp) {
-  for (let cycle = 0; cycle < 6; cycle += 1) {
-    await acceptTermsEverywhere(session.port);
-    let popup = await openPopup(session.port);
-    await evaluate(popup, acceptTermsExpression).catch(() => {});
-    await sleep(800);
-    if (popup.id) await closeTarget(session.port, popup.id);
-    const alreadyChanged = await waitForChangedIp(session.port, baselineIp, 2);
-    if (alreadyChanged && alreadyChanged !== baselineIp) return alreadyChanged;
-    popup = await openPopup(session.port);
-    const result = await evaluate(popup, activationExpression).catch(() => ({ clicked: false }));
-    console.log(`${PROVIDER} normal-Chrome activation: ${JSON.stringify(result)}`);
-    if (popup.id) await closeTarget(session.port, popup.id);
-    await sleep(1_500);
-    const changed = await waitForChangedIp(session.port, baselineIp, 5);
-    if (changed && changed !== baselineIp) return changed;
-  }
-  return undefined;
-}
-
+await downloadAndUnpackOfficialExtension();
 const baselineIp = await fetchIpOutsideBrowser();
 console.log(`Runner public IP before ${PROVIDER}: ${baselineIp}`);
+
 let session = await launchNormalChrome();
 let vpnIp;
+let extensionId;
 try {
-  vpnIp = await activateBrowsec(session, baselineIp);
+  extensionId = await activateBrowsec(session);
+  vpnIp = await waitForChangedIp(session.port, baselineIp, 24);
   if (!vpnIp || vpnIp === baselineIp) throw new Error(`${PROVIDER} did not change the normal Chrome public IP.`);
   console.log(`${PROVIDER} changed the normal Chrome public IP to ${vpnIp}.`);
 } finally { await stopChrome(session); }
@@ -264,10 +299,22 @@ try {
 session = await launchNormalChrome();
 let restartIp;
 try {
-  restartIp = await waitForChangedIp(session.port, baselineIp, 18);
+  restartIp = await waitForChangedIp(session.port, baselineIp, 24);
   if (!restartIp || restartIp === baselineIp) throw new Error(`${PROVIDER} did not remain active after a normal Chrome restart.`);
   console.log(`${PROVIDER} remained active after normal Chrome restart: ${restartIp}.`);
 } finally { await stopChrome(session); }
 
-await writeFile(statusPath, `${JSON.stringify({provider:PROVIDER,browser:"chrome",verified:true,restartVerified:true,extensionId:EXTENSION_ID,baselineIp,vpnIp,restartIp,verifiedAt:new Date().toISOString()}, null, 2)}\n`, "utf8");
+await writeFile(statusPath, `${JSON.stringify({
+  provider: PROVIDER,
+  browser: "chrome",
+  country: VPN_COUNTRY,
+  verified: true,
+  restartVerified: true,
+  extensionId,
+  extensionPath: unpackedDirectory,
+  baselineIp,
+  vpnIp,
+  restartIp,
+  verifiedAt: new Date().toISOString(),
+}, null, 2)}\n`, "utf8");
 console.log(`${PROVIDER} is active and restart-persistent in chrome: ${baselineIp} -> ${restartIp}`);
