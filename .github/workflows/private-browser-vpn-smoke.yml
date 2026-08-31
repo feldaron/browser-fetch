@@ -6,6 +6,8 @@ on:
       - .github/workflows/private-browser.yml
       - .github/workflows/private-browser-vpn-smoke.yml
       - scripts/prepare-private-vpn.mjs
+      - scripts/prepare-private-vpn-chrome.mjs
+      - scripts/prepare-private-vpn-runtime.mjs
       - scripts/launch-private-browser.mjs
       - package.json
   workflow_dispatch:
@@ -50,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xvfb
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xvfb unzip
 
           ensure_driver() {
             local command_name="$1"
@@ -104,18 +106,7 @@ jobs:
             test -s "$extension_dir/$extension_id.xpi"
             echo "BROWSEC_FIREFOX_EXTENSION_ID=$extension_id" >> "$GITHUB_ENV"
           else
-            sudo mkdir -p /etc/opt/chrome/policies/managed
-            sudo tee /etc/opt/chrome/policies/managed/private-browser-vpn.json > /dev/null <<'JSON'
-          {
-            "ExtensionSettings": {
-              "omghfjlpggmjjaagoclmmobgdodcjboh": {
-                "installation_mode": "force_installed",
-                "update_url": "https://clients2.google.com/service/update2/crx",
-                "toolbar_pin": "force_pinned"
-              }
-            }
-          }
-          JSON
+            echo "Chrome Browsec is downloaded and installed by WebDriver BiDi during verification."
           fi
 
       - name: Start virtual display
