@@ -62,7 +62,7 @@ if (browserName === "chrome") {
     ]) {
       try {
         const response = await fetch(endpoint, {
-          headers: { "user-agent": "LaptopValue-private-browser-vpn-check/9.0" },
+          headers: { "user-agent": "LaptopValue-private-browser-vpn-check/10.0" },
           signal: AbortSignal.timeout(8_000),
         });
         if (!response.ok) continue;
@@ -134,10 +134,7 @@ if (browserName === "chrome") {
       .setFirefoxService(service)
       .build();
 
-    await driver.manage().setTimeouts({
-      pageLoad: 5_000,
-      script: 45_000,
-    });
+    await driver.manage().setTimeouts({ pageLoad: 5_000, script: 45_000 });
 
     if (!restart) {
       await readFile(firefoxXpiPath).catch(() => {
@@ -254,45 +251,21 @@ if (browserName === "chrome") {
               [acceptPhaseKey]: 2
             });
 
-            let readiness = null;
-            for (let attempt = 0; attempt < 60; attempt += 1) {
-              const serversObject = await getKey('serversObject');
-              const userPac = await getKey('userPac');
-              const countries = serversObject?.countries ?? {};
-              const requested = countries?.[country] ?? null;
-              const freeServers = Array.isArray(requested?.servers) ? requested.servers.length : 0;
-              const availableFreeCountries = Object.entries(countries)
-                .filter(([, value]) => Array.isArray(value?.servers) && value.servers.length > 0)
-                .map(([key]) => key)
-                .sort();
-              readiness = {
-                hasServersObject: Boolean(serversObject),
-                freeServers,
-                availableFreeCountries,
-                userPacReady: Boolean(userPac && Array.isArray(userPac.filters))
-              };
-              if (freeServers > 0 && readiness.userPacReady) break;
-              await new Promise((resolve) => setTimeout(resolve, 400));
-            }
-
-            if (!readiness?.freeServers || !readiness?.userPacReady) {
-              throw new Error(
-                'Browsec did not expose a usable free server list before activation: ' +
-                JSON.stringify(readiness)
-              );
-            }
-
-            const current = await getKey('userPac');
+            const stored = await getKey('userPac');
+            const current = stored && typeof stored === 'object' && Array.isArray(stored.filters)
+              ? stored
+              : { mode: 'direct', country: null, broken: false, filters: [] };
             const next = {
               ...current,
               mode: 'proxy',
               country,
+              broken: false,
               filters: current.filters
             };
             await setValues({ userPac: next });
 
             let applied = null;
-            for (let attempt = 0; attempt < 35; attempt += 1) {
+            for (let attempt = 0; attempt < 50; attempt += 1) {
               const low = await getKey('lowLevelPac');
               const storedPac = await getKey('userPac');
               const countryServers = Array.isArray(low?.countries?.[country])
@@ -324,7 +297,7 @@ if (browserName === "chrome") {
               throw new Error('Browsec did not generate a usable low-level PAC: ' + JSON.stringify(applied));
             }
 
-            return { backend, readiness, applied };
+            return { backend, defaultedUserPac: stored == null, applied };
           } finally {
             db?.close?.();
           }
