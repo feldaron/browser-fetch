@@ -141,26 +141,39 @@ if (browserName === "chrome") {
   }
 
   async function resolveFirefoxExtensionUuid(driver) {
-    const originalUrl = await driver.getCurrentUrl().catch(() => "about:blank");
-    try {
-      await driver.get("about:debugging#/runtime/this-firefox");
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        await sleep(500);
-        const text = await bodyText(driver);
-        const source = await driver.getPageSource().catch(() => "");
-        const markerIndex = text.indexOf(FIREFOX_EXTENSION_ID);
-        const nearby = markerIndex >= 0
-          ? text.slice(Math.max(0, markerIndex - 2_000), markerIndex + 4_000)
-          : text;
-        const fromText = nearby.match(/Internal UUID\s+([0-9a-f-]{36})/i)?.[1];
-        const fromManifest = source.match(/moz-extension:\/\/([0-9a-f-]{36})\/manifest\.json/i)?.[1];
-        const uuid = fromText ?? fromManifest;
-        if (uuid) return uuid;
-      }
-    } finally {
-      await driver.get(originalUrl || "about:blank").catch(() => {});
+    const capabilities = await driver.getCapabilities();
+    const runtimeProfile = capabilities.get("moz:profile");
+    if (!runtimeProfile || typeof runtimeProfile !== "string") {
+      throw new Error("Firefox WebDriver did not report its runtime profile path while resolving Browsec.");
     }
-    throw new Error("Firefox did not expose Browsec's runtime extension UUID in about:debugging.");
+
+    const prefsPath = path.join(runtimeProfile, "prefs.js");
+    const extensionsPath = path.join(runtimeProfile, "extensions.json");
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const prefs = await readFile(prefsPath, "utf8").catch(() => "");
+      const preference = prefs.match(/user_pref\("extensions\.webextensions\.uuids",\s*("(?:\\.|[^"\\])*")\);/);
+      if (preference) {
+        try {
+          const encodedMap = JSON.parse(preference[1]);
+          const uuidMap = JSON.parse(encodedMap);
+          const uuid = uuidMap?.[FIREFOX_EXTENSION_ID];
+          if (typeof uuid === "string" && /^[0-9a-f-]{36}$/i.test(uuid)) return uuid;
+        } catch {}
+      }
+
+      try {
+        const extensions = JSON.parse(await readFile(extensionsPath, "utf8"));
+        const addon = extensions?.addons?.find((item) => item?.id === FIREFOX_EXTENSION_ID);
+        const rootUri = addon?.rootURI ?? addon?.rootUri;
+        const fromRoot = typeof rootUri === "string"
+          ? rootUri.match(/^moz-extension:\/\/([0-9a-f-]{36})\//i)?.[1]
+          : undefined;
+        if (fromRoot) return fromRoot;
+      } catch {}
+
+      await sleep(250);
+    }
+    throw new Error("Firefox did not persist Browsec's runtime moz-extension UUID in its profile.");
   }
 
   async function openExtensionPage(driver, uuid) {
