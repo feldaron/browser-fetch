@@ -20,7 +20,7 @@ if (browserName === "chrome") {
   );
 
   // Firefox assigns a runtime moz-extension:// UUID when Browsec is installed.
-  // Firefox 154 no longer exposes the old privileged WebExtensionPolicy lookup to
+  // Firefox 154 no longer exposes the old privileged extension-policy lookup to
   // WebDriver scripts, so resolve the UUID from Firefox's own about:debugging UI.
   const runtimeSourceUrl = new URL("./prepare-private-vpn-runtime.mjs", import.meta.url);
   const original = await readFile(runtimeSourceUrl, "utf8");
