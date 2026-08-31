@@ -24,12 +24,26 @@ const profileRoot = process.env.PRIVATE_BROWSER_PROFILE_ROOT ??
 const profileDirectory = path.join(profileRoot, browserName);
 const downloadDirectory = process.env.PRIVATE_BROWSER_DOWNLOAD_DIRECTORY ??
   "/tmp/private-browser/downloads";
+const vpnStatusPath = process.env.PRIVATE_BROWSER_VPN_STATUS ??
+  "/tmp/private-browser/vpn-status.json";
 
 await Promise.all([
   mkdir(profileDirectory, { recursive: true }),
   mkdir(downloadDirectory, { recursive: true }),
 ]);
 
+let vpnStatus;
+try {
+  vpnStatus = JSON.parse(await readFile(vpnStatusPath, "utf8"));
+} catch (error) {
+  throw new Error(`Verified VPN status is unavailable at ${vpnStatusPath}: ${error.message}`);
+}
+if (vpnStatus?.provider !== "Browsec" || vpnStatus?.browser !== browserName ||
+    vpnStatus?.verified !== true || vpnStatus?.restartVerified !== true) {
+  throw new Error(`Refusing to launch ${browserName}: Browsec VPN was not restart-verified.`);
+}
+
+let chromeExtensionPath;
 if (browserName === "firefox") {
   const downloadPreference = JSON.stringify(downloadDirectory);
   await writeFile(
@@ -50,6 +64,15 @@ if (browserName === "firefox") {
     "utf8",
   );
 } else {
+  chromeExtensionPath = vpnStatus?.extensionPath;
+  if (typeof chromeExtensionPath !== "string" || !chromeExtensionPath) {
+    throw new Error("Refusing to launch Chrome: verified Browsec extension path is missing.");
+  }
+  const manifest = JSON.parse(await readFile(path.join(chromeExtensionPath, "manifest.json"), "utf8"));
+  if (!manifest?.name || !manifest?.version) {
+    throw new Error("Refusing to launch Chrome: verified Browsec extension package is invalid.");
+  }
+
   const defaultProfileDirectory = path.join(profileDirectory, "Default");
   const preferencesPath = path.join(defaultProfileDirectory, "Preferences");
   await mkdir(defaultProfileDirectory, { recursive: true });
@@ -93,6 +116,7 @@ const args = browserName === "firefox"
     ]
   : [
       `--user-data-dir=${profileDirectory}`,
+      `--load-extension=${chromeExtensionPath}`,
       "--no-first-run",
       "--no-default-browser-check",
       "--start-maximized",
@@ -110,7 +134,7 @@ browser.on("error", (error) => {
   process.exitCode = 1;
 });
 
-console.log(`Private ${browserName} opened at ${startUrl.toString()}`);
+console.log(`Private ${browserName} opened at ${startUrl.toString()} with restart-verified Browsec VPN.`);
 
 let closing = false;
 function close(signal) {
