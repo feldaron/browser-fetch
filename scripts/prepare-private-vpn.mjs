@@ -20,9 +20,10 @@ const profileRoot = process.env.PRIVATE_BROWSER_PROFILE_ROOT ??
 const profileDirectory = path.join(profileRoot, browserName);
 const statusPath = process.env.PRIVATE_BROWSER_VPN_STATUS ??
   "/tmp/private-browser/vpn-status.json";
+const diagnosticsDirectory = path.dirname(statusPath);
 
 await mkdir(profileDirectory, { recursive: true });
-await mkdir(path.dirname(statusPath), { recursive: true });
+await mkdir(diagnosticsDirectory, { recursive: true });
 
 function extractIp(text) {
   const trimmed = text.trim();
@@ -84,16 +85,52 @@ function isBrowsecPage(page) {
   }
 }
 
+async function savePopupDiagnostics(page, suffix = "activation-failure") {
+  if (!page || page.isClosed()) return;
+
+  const stem = `browsec-${browserName}-${suffix}`;
+  const textPath = path.join(diagnosticsDirectory, `${stem}.txt`);
+  const htmlPath = path.join(diagnosticsDirectory, `${stem}.html`);
+  const screenshotPath = path.join(diagnosticsDirectory, `${stem}.png`);
+
+  const text = await bodyText(page);
+  const html = await page.content().catch(() => "");
+  const controls = await page.locator(
+    'button, [role="button"], [role="switch"], [role="checkbox"], a, label, input',
+  ).evaluateAll((nodes) => nodes.slice(0, 100).map((node) => ({
+    tag: node.tagName,
+    text: (node.textContent ?? "").trim(),
+    role: node.getAttribute("role"),
+    ariaLabel: node.getAttribute("aria-label"),
+    ariaChecked: node.getAttribute("aria-checked"),
+    type: node.getAttribute("type"),
+    value: node.getAttribute("value"),
+    className: typeof node.className === "string" ? node.className : "",
+  }))).catch(() => []);
+
+  await Promise.all([
+    writeFile(
+      textPath,
+      `URL: ${page.url()}\n\nBODY TEXT:\n${text}\n\nCONTROLS:\n${JSON.stringify(controls, null, 2)}\n`,
+      "utf8",
+    ).catch(() => {}),
+    writeFile(htmlPath, html, "utf8").catch(() => {}),
+    page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {}),
+  ]);
+}
+
 async function acceptTerms(page) {
   if (!isBrowsecPage(page)) return false;
 
   try {
     const text = await bodyText(page);
-    if (!/terms|conditions|privacy|accept|agree|consent/i.test(text)) return false;
+    if (!/terms(?: and conditions)?|privacy policy|accept|agree|consent/i.test(text)) {
+      return false;
+    }
 
     let changed = false;
     const toggles = page.locator(
-      'input[type="checkbox"], [role="checkbox"], [role="switch"]',
+      'input[type="checkbox"], [role="checkbox"]',
     );
     const toggleCount = Math.min(await toggles.count(), 10);
     for (let index = 0; index < toggleCount; index += 1) {
@@ -113,16 +150,22 @@ async function acceptTerms(page) {
 
     const acceptNames = /accept|agree|continue|confirm/i;
     const button = page.getByRole("button", { name: acceptNames }).first();
-    if (await button.count().catch(() => 0)) {
+    if (await button.isVisible().catch(() => false)) {
       await button.click({ force: true }).catch(() => {});
       return true;
     }
 
     const fallback = page.locator(
-      'button, [role="button"], input[type="button"], input[type="submit"]',
+      'button, [role="button"], input[type="button"], input[type="submit"], a, label',
     ).filter({ hasText: acceptNames }).first();
-    if (await fallback.count().catch(() => 0)) {
+    if (await fallback.isVisible().catch(() => false)) {
       await fallback.click({ force: true }).catch(() => {});
+      return true;
+    }
+
+    const textFallback = page.getByText(acceptNames).first();
+    if (await textFallback.isVisible().catch(() => false)) {
+      await textFallback.click({ force: true }).catch(() => {});
       return true;
     }
 
@@ -151,7 +194,15 @@ async function openPopup(context) {
     const page = await context.newPage();
     try {
       await page.goto(popupUrl, { waitUntil: "domcontentloaded", timeout: 5_000 });
-      if (!page.isClosed() && page.url().startsWith(popupUrl)) return page;
+      if (!page.isClosed() && page.url().startsWith(popupUrl)) {
+        await page.waitForFunction(
+          () => (document.body?.innerText ?? "").trim().length > 0,
+          undefined,
+          { timeout: 8_000 },
+        ).catch(() => {});
+        await page.waitForTimeout(750);
+        return page;
+      }
     } catch {
       // Force-installed extensions may need a few seconds to arrive from the store.
     }
@@ -162,9 +213,49 @@ async function openPopup(context) {
   throw new Error(`${PROVIDER} did not become available in ${browserName}.`);
 }
 
+async function clickVpnControl(page) {
+  const startNames = /start vpn|protect me|turn on|connect/i;
+
+  const roleButton = page.getByRole("button", { name: startNames }).first();
+  if (await roleButton.isVisible().catch(() => false)) {
+    await roleButton.click({ force: true });
+    return true;
+  }
+
+  const semanticFallback = page.locator(
+    'button, [role="button"], a, input[type="button"], input[type="submit"], label, [class*="button"], [class*="Button"]',
+  ).filter({ hasText: startNames }).first();
+  if (await semanticFallback.isVisible().catch(() => false)) {
+    await semanticFallback.click({ force: true });
+    return true;
+  }
+
+  const textFallback = page.getByText(startNames).first();
+  if (await textFallback.isVisible().catch(() => false)) {
+    await textFallback.click({ force: true });
+    return true;
+  }
+
+  const switchControl = page.getByRole("switch").last();
+  if (await switchControl.isVisible().catch(() => false)) {
+    const checked = await switchControl.getAttribute("aria-checked").catch(() => null);
+    if (checked !== "true") {
+      await switchControl.click({ force: true });
+      return true;
+    }
+  }
+
+  const offControl = page.getByText(/^off$/i).last();
+  if (await offControl.isVisible().catch(() => false)) {
+    await offControl.click({ force: true });
+    return true;
+  }
+
+  return false;
+}
+
 async function startVpn(context) {
   const connectedPattern = /connected|protected|vpn is on|turn off|disconnect/i;
-  const startNames = /start vpn|protect me|turn on|connect/i;
 
   for (let attempt = 0; attempt < 8; attempt += 1) {
     await acceptTermsEverywhere(context);
@@ -181,24 +272,21 @@ async function startVpn(context) {
         continue;
       }
 
+      await page.waitForTimeout(750);
       text = await bodyText(page);
       if (connectedPattern.test(text)) return;
 
-      const button = page.getByRole("button", { name: startNames }).first();
-      if (await button.count().catch(() => 0)) {
-        await button.click({ force: true });
+      if (await clickVpnControl(page)) {
+        await page.waitForTimeout(1_500);
         return;
       }
 
-      const fallback = page.locator(
-        'button, [role="button"], a, input[type="button"], input[type="submit"]',
-      ).filter({ hasText: startNames }).first();
-      if (await fallback.count().catch(() => 0)) {
-        await fallback.click({ force: true });
-        return;
+      if (attempt === 7) {
+        await savePopupDiagnostics(page);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (page && !page.isClosed()) await savePopupDiagnostics(page, "exception");
       if (!/closed|destroyed|target/i.test(message)) throw error;
     } finally {
       if (page && !page.isClosed()) await page.close().catch(() => {});
@@ -256,6 +344,7 @@ if (browserName === "firefox") {
   launchOptions.ignoreDefaultArgs = [
     "--disable-extensions",
     "--disable-background-networking",
+    "--disable-component-update",
   ];
   launchOptions.args = [
     "--no-first-run",
