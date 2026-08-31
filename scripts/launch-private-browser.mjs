@@ -94,7 +94,6 @@ const args = browserName === "firefox"
       `--user-data-dir=${profileDirectory}`,
       "--no-first-run",
       "--no-default-browser-check",
-      "--disable-background-networking",
       "--start-maximized",
       "--window-size=1600,1000",
       startUrl.toString(),
