@@ -7,7 +7,6 @@ const smokeWorkflowPath = new URL("../.github/workflows/private-browser-vpn-smok
 const launcherPath = new URL("../scripts/launch-private-browser.mjs", import.meta.url);
 const vpnSetupPath = new URL("../scripts/prepare-private-vpn.mjs", import.meta.url);
 const vpnChromePath = new URL("../scripts/prepare-private-vpn-chrome.mjs", import.meta.url);
-const vpnRuntimePath = new URL("../scripts/prepare-private-vpn-runtime.mjs", import.meta.url);
 
 test("private browser defaults to Firefox and gates exposure on a verified VPN", async () => {
   const workflow = await readFile(workflowPath, "utf8");
@@ -20,12 +19,11 @@ test("private browser defaults to Firefox and gates exposure on a verified VPN",
   assert.ok(verifyPosition >= 0 && tunnelPosition > verifyPosition);
 });
 
-test("Firefox stages the official add-on and resolves its runtime origin from the WebDriver profile", async () => {
-  const [workflow, launcher, vpnSetup, vpnRuntime] = await Promise.all([
+test("Firefox stages the official add-on and persists its WebDriver profile", async () => {
+  const [workflow, launcher, vpnSetup] = await Promise.all([
     readFile(workflowPath, "utf8"),
     readFile(launcherPath, "utf8"),
     readFile(vpnSetupPath, "utf8"),
-    readFile(vpnRuntimePath, "utf8"),
   ]);
   assert.match(workflow, /addons\.mozilla\.org\/api\/v5\/addons\/addon\/browsec/);
   assert.match(workflow, /BROWSEC_FIREFOX_EXTENSION_ID/);
@@ -33,30 +31,39 @@ test("Firefox stages the official add-on and resolves its runtime origin from th
   assert.match(vpnSetup, /browsec@browsec\.com/);
   assert.match(vpnSetup, /prefs\.js/);
   assert.match(vpnSetup, /extensions\.json/);
-  assert.match(vpnSetup, /webextensions/);
   assert.match(vpnSetup, /moz:profile/);
+  assert.match(vpnSetup, /persistRuntimeProfile/);
+  assert.match(vpnSetup, /restartVerified/);
   assert.doesNotMatch(vpnSetup, /about:debugging#\/runtime\/this-firefox/);
   assert.doesNotMatch(vpnSetup, /ChromeUtils\.importESModule/);
-  assert.match(vpnRuntime, /selenium-webdriver/);
-  assert.match(vpnRuntime, /restart-persistent/);
 });
 
-test("Chrome uses a managed Web Store install in the same persistent normal profile used by the session", async () => {
-  const [workflow, smokeWorkflow, vpnSetup, vpnChrome] = await Promise.all([
+test("Chrome force-installs the Store extension and launches only its verified persistent profile", async () => {
+  const [workflow, smokeWorkflow, launcher, vpnSetup, vpnChrome] = await Promise.all([
     readFile(workflowPath, "utf8"),
     readFile(smokeWorkflowPath, "utf8"),
+    readFile(launcherPath, "utf8"),
     readFile(vpnSetupPath, "utf8"),
     readFile(vpnChromePath, "utf8"),
   ]);
+
   assert.match(vpnSetup, /prepare-private-vpn-chrome\.mjs/);
-  assert.match(workflow, /ExtensionSettings/);
-  assert.match(smokeWorkflow, /ExtensionSettings/);
-  assert.match(workflow, /omghfjlpggmjjaagoclmmobgdodcjboh/);
-  assert.match(smokeWorkflow, /omghfjlpggmjjaagoclmmobgdodcjboh/);
-  assert.match(vpnChrome, /--remote-debugging-port=0/);
-  assert.match(vpnChrome, /chrome-extension:\/\/\$\{EXTENSION_ID\}\/popup\/popup\.html/);
-  assert.match(vpnChrome, /normal Chrome public IP/);
+  for (const content of [workflow, smokeWorkflow]) {
+    assert.match(content, /ExtensionSettings/);
+    assert.match(content, /omghfjlpggmjjaagoclmmobgdodcjboh/);
+    assert.match(content, /force_installed/);
+    assert.match(content, /clients2\.google\.com\/service\/update2\/crx/);
+  }
+
+  assert.match(vpnChrome, /const EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh"/);
+  assert.match(vpnChrome, /popupUrl/);
+  assert.match(vpnChrome, /managed normal Chrome public IP/);
   assert.match(vpnChrome, /normal Chrome restart/);
   assert.doesNotMatch(vpnChrome, /webExtension\.install/);
   assert.doesNotMatch(vpnChrome, /enableBidi/);
+
+  assert.match(launcher, /const CHROME_EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh"/);
+  assert.match(launcher, /vpnStatus\?\.extensionId !== CHROME_EXTENSION_ID/);
+  assert.match(launcher, /restartVerified !== true/);
+  assert.doesNotMatch(launcher, /--load-extension=/);
 });
