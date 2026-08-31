@@ -4,6 +4,7 @@ import path from "node:path";
 
 const FIREFOX_EXTENSION_ID = process.env.BROWSEC_FIREFOX_EXTENSION_ID ??
   "browsec@browsec.com";
+const CHROME_EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh";
 
 const rawUrl = process.argv[2] ?? "https://www.currys.co.uk/";
 const startUrl = new URL(rawUrl);
@@ -43,7 +44,6 @@ if (vpnStatus?.provider !== "Browsec" || vpnStatus?.browser !== browserName ||
   throw new Error(`Refusing to launch ${browserName}: Browsec VPN was not restart-verified.`);
 }
 
-let chromeExtensionPath;
 if (browserName === "firefox") {
   const downloadPreference = JSON.stringify(downloadDirectory);
   await writeFile(
@@ -64,13 +64,8 @@ if (browserName === "firefox") {
     "utf8",
   );
 } else {
-  chromeExtensionPath = vpnStatus?.extensionPath;
-  if (typeof chromeExtensionPath !== "string" || !chromeExtensionPath) {
-    throw new Error("Refusing to launch Chrome: verified Browsec extension path is missing.");
-  }
-  const manifest = JSON.parse(await readFile(path.join(chromeExtensionPath, "manifest.json"), "utf8"));
-  if (!manifest?.name || !manifest?.version) {
-    throw new Error("Refusing to launch Chrome: verified Browsec extension package is invalid.");
+  if (vpnStatus?.extensionId !== CHROME_EXTENSION_ID) {
+    throw new Error("Refusing to launch Chrome: the verified extension is not Browsec from the Chrome Web Store.");
   }
 
   const defaultProfileDirectory = path.join(profileDirectory, "Default");
@@ -116,7 +111,6 @@ const args = browserName === "firefox"
     ]
   : [
       `--user-data-dir=${profileDirectory}`,
-      `--load-extension=${chromeExtensionPath}`,
       "--no-first-run",
       "--no-default-browser-check",
       "--start-maximized",
