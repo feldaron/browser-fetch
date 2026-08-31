@@ -26,9 +26,11 @@ test("Browsec is configured for both Firefox and Chrome", async () => {
     readFile(vpnSetupPath, "utf8"),
   ]);
 
-  for (const content of [workflow, launcher, vpnSetup]) {
-    assert.match(content, /browsec@browsec\.com/);
-  }
+  assert.match(workflow, /addons\.mozilla\.org\/api\/v5\/addons\/addon\/browsec/);
+  assert.match(workflow, /BROWSEC_FIREFOX_EXTENSION_ID/);
+  assert.match(launcher, /BROWSEC_FIREFOX_EXTENSION_ID/);
+  assert.match(vpnSetup, /browsec@browsec\.com/);
+
   assert.match(workflow, /omghfjlpggmjjaagoclmmobgdodcjboh/);
   assert.match(vpnSetup, /omghfjlpggmjjaagoclmmobgdodcjboh/);
   assert.match(vpnSetup, /restart-persistent/);
