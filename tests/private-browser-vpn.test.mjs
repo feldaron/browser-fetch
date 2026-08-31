@@ -5,6 +5,7 @@ import test from "node:test";
 const workflowPath = new URL("../.github/workflows/private-browser.yml", import.meta.url);
 const launcherPath = new URL("../scripts/launch-private-browser.mjs", import.meta.url);
 const vpnSetupPath = new URL("../scripts/prepare-private-vpn.mjs", import.meta.url);
+const vpnChromePath = new URL("../scripts/prepare-private-vpn-chrome.mjs", import.meta.url);
 const vpnRuntimePath = new URL("../scripts/prepare-private-vpn-runtime.mjs", import.meta.url);
 
 test("private browser defaults to Firefox and gates exposure on a verified VPN", async () => {
@@ -21,10 +22,11 @@ test("private browser defaults to Firefox and gates exposure on a verified VPN",
 });
 
 test("Browsec is installed and verified for both Firefox and Chrome", async () => {
-  const [workflow, launcher, vpnSetup, vpnRuntime] = await Promise.all([
+  const [workflow, launcher, vpnSetup, vpnChrome, vpnRuntime] = await Promise.all([
     readFile(workflowPath, "utf8"),
     readFile(launcherPath, "utf8"),
     readFile(vpnSetupPath, "utf8"),
+    readFile(vpnChromePath, "utf8"),
     readFile(vpnRuntimePath, "utf8"),
   ]);
 
@@ -32,11 +34,12 @@ test("Browsec is installed and verified for both Firefox and Chrome", async () =
   assert.match(workflow, /BROWSEC_FIREFOX_EXTENSION_ID/);
   assert.match(launcher, /BROWSEC_FIREFOX_EXTENSION_ID/);
   assert.match(vpnSetup, /browsec@browsec\.com/);
+  assert.match(vpnSetup, /prepare-private-vpn-chrome\.mjs/);
   assert.match(vpnRuntime, /selenium-webdriver/);
   assert.match(vpnRuntime, /WebExtensionPolicy/);
 
-  assert.match(vpnSetup, /clients2\.google\.com\/service\/update2\/crx/);
-  assert.match(vpnSetup, /omghfjlpggmjjaagoclmmobgdodcjboh/);
-  assert.match(vpnRuntime, /omghfjlpggmjjaagoclmmobgdodcjboh/);
+  assert.match(vpnChrome, /clients2\.google\.com\/service\/update2\/crx/);
+  assert.match(vpnChrome, /omghfjlpggmjjaagoclmmobgdodcjboh/);
+  assert.match(vpnChrome, /restart-persistent/);
   assert.match(vpnRuntime, /restart-persistent/);
 });
