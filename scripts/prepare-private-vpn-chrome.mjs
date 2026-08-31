@@ -118,14 +118,8 @@ async function sendBidiCommand(driver, method, params) {
   const socket = new WebSocket(webSocketUrl);
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Timed out opening the WebDriver BiDi websocket.")), 10_000);
-    socket.addEventListener("open", () => {
-      clearTimeout(timer);
-      resolve();
-    }, { once: true });
-    socket.addEventListener("error", () => {
-      clearTimeout(timer);
-      reject(new Error("Unable to open the WebDriver BiDi websocket."));
-    }, { once: true });
+    socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+    socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("Unable to open the WebDriver BiDi websocket.")); }, { once: true });
   });
 
   const id = Math.floor(Math.random() * 1_000_000_000) + 1;
@@ -134,11 +128,7 @@ async function sendBidiCommand(driver, method, params) {
       const timer = setTimeout(() => reject(new Error(`Timed out running BiDi command ${method}.`)), 30_000);
       const onMessage = (event) => {
         let message;
-        try {
-          message = JSON.parse(String(event.data));
-        } catch {
-          return;
-        }
+        try { message = JSON.parse(String(event.data)); } catch { return; }
         if (message.id !== id) return;
         clearTimeout(timer);
         socket.removeEventListener("message", onMessage);
@@ -158,10 +148,7 @@ async function sendBidiCommand(driver, method, params) {
 
 async function installExtensionViaBidi(driver) {
   const result = await sendBidiCommand(driver, "webExtension.install", {
-    extensionData: {
-      type: "path",
-      path: unpackedDirectory,
-    },
+    extensionData: { type: "path", path: unpackedDirectory },
   });
   const extensionId = result?.extension;
   if (!extensionId || typeof extensionId !== "string") {
@@ -272,43 +259,23 @@ const activationScript = `
         ['button', 'link'].includes(element.getAttribute('role'));
       return clickable && /^(start vpn|protect me|turn on|connect)(\\b|\\s|$)/i.test(text);
     });
-    if (action) {
-      action.click();
-      return { clicked: true, control: 'text', label: label(action) };
-    }
+    if (action) { action.click(); return { clicked: true, control: 'text', label: label(action) }; }
   }
-
   if (mode === 'c-switch') {
     const target = nodes.filter((element) => element.tagName.toLowerCase() === 'c-switch').at(-1);
-    if (target) {
-      target.click();
-      return { clicked: true, control: 'c-switch', label: label(target) };
-    }
+    if (target) { target.click(); return { clicked: true, control: 'c-switch', label: label(target) }; }
   }
-
   if (mode === 'role-switch') {
     const target = nodes.filter((element) => element.getAttribute('role') === 'switch').at(-1);
-    if (target) {
-      target.click();
-      return { clicked: true, control: 'role-switch', label: label(target) };
-    }
+    if (target) { target.click(); return { clicked: true, control: 'role-switch', label: label(target) }; }
   }
-
   const off = nodes.find((element) => /^off$/i.test(label(element)));
-  if (mode === 'off' && off) {
-    off.click();
-    return { clicked: true, control: 'off-label', label: label(off) };
-  }
-
+  if (mode === 'off' && off) { off.click(); return { clicked: true, control: 'off-label', label: label(off) }; }
   return { clicked: false, control: mode };
 `;
 
 async function bodyText(driver) {
-  try {
-    return await driver.findElement(By.css("body")).getText();
-  } catch {
-    return "";
-  }
+  try { return await driver.findElement(By.css("body")).getText(); } catch { return ""; }
 }
 
 async function saveDiagnostics(driver, suffix) {
@@ -321,17 +288,10 @@ async function saveDiagnostics(driver, suffix) {
   try { source = await driver.getPageSource(); } catch {}
   try { nodes = await driver.executeScript(collectNodesScript); } catch {}
   try { screenshot = await driver.takeScreenshot(); } catch {}
-
   await Promise.all([
-    writeFile(
-      path.join(diagnosticsDirectory, `${stem}.txt`),
-      `URL: ${currentUrl}\n\nBODY TEXT:\n${await bodyText(driver)}\n\nDEEP NODES:\n${JSON.stringify(nodes, null, 2)}\n`,
-      "utf8",
-    ).catch(() => {}),
+    writeFile(path.join(diagnosticsDirectory, `${stem}.txt`), `URL: ${currentUrl}\n\nBODY TEXT:\n${await bodyText(driver)}\n\nDEEP NODES:\n${JSON.stringify(nodes, null, 2)}\n`, "utf8").catch(() => {}),
     writeFile(path.join(diagnosticsDirectory, `${stem}.html`), source, "utf8").catch(() => {}),
-    screenshot
-      ? writeFile(path.join(diagnosticsDirectory, `${stem}.png`), screenshot, "base64").catch(() => {})
-      : Promise.resolve(),
+    screenshot ? writeFile(path.join(diagnosticsDirectory, `${stem}.png`), screenshot, "base64").catch(() => {}) : Promise.resolve(),
   ]);
 }
 
@@ -345,16 +305,11 @@ async function acceptTermsEverywhere(driver) {
       if (!url.startsWith("chrome-extension://") && !/https?:\/\/([^.]+\.)*browsec\.com\//i.test(url)) continue;
       const result = await driver.executeScript(acceptTermsScript);
       if (result?.relevant) await sleep(800);
-    } catch {
-      // First-run provider pages may close themselves.
-    }
+    } catch {}
   }
   const remaining = await driver.getAllWindowHandles().catch(() => []);
-  if (original && remaining.includes(original)) {
-    await driver.switchTo().window(original).catch(() => {});
-  } else if (remaining.length) {
-    await driver.switchTo().window(remaining[0]).catch(() => {});
-  }
+  if (original && remaining.includes(original)) await driver.switchTo().window(original).catch(() => {});
+  else if (remaining.length) await driver.switchTo().window(remaining[0]).catch(() => {});
 }
 
 async function openPopup(driver, extensionId) {
@@ -371,9 +326,7 @@ async function openPopup(driver, extensionId) {
         throw new Error("Chrome reports the extension page is blocked/unavailable.");
       }
       if (current.startsWith(target)) return;
-    } catch (error) {
-      lastError = error;
-    }
+    } catch (error) { lastError = error; }
     await sleep(750);
   }
   throw lastError ?? new Error(`${PROVIDER} did not become available in Chrome.`);
@@ -381,62 +334,47 @@ async function openPopup(driver, extensionId) {
 
 async function fetchIpThroughBrowser(driver) {
   const original = await driver.getWindowHandle().catch(() => undefined);
-  for (const endpoint of [
-    "https://api.ipify.org?format=json",
-    "https://ifconfig.co/ip",
-    "https://icanhazip.com/",
-  ]) {
-    let temporary;
+  for (const endpoint of ["https://api.ipify.org?format=json", "https://ifconfig.co/ip", "https://icanhazip.com/"]) {
     try {
-      temporary = await driver.switchTo().newWindow("tab");
       await driver.get(endpoint);
-      await sleep(300);
+      await sleep(500);
       const ip = extractIp(await bodyText(driver));
-      if (ip) {
-        await driver.close().catch(() => {});
-        if (original) await driver.switchTo().window(original).catch(() => {});
-        return ip;
-      }
-    } catch {
-      // Try another independent IP endpoint.
-    }
-    if (temporary) await driver.close().catch(() => {});
-    if (original) await driver.switchTo().window(original).catch(() => {});
+      if (ip) return ip;
+    } catch {}
   }
-  return undefined;
+  if (original) await driver.switchTo().window(original).catch(() => {});
+  throw new Error("Unable to determine the Chrome public IP after enabling the VPN.");
 }
 
-async function waitForChangedIp(driver, baseline, attempts = 8) {
+async function waitForChangedIp(driver, baseline, attempts) {
   let latest;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await sleep(900);
     latest = await fetchIpThroughBrowser(driver).catch(() => undefined);
     if (latest && latest !== baseline) return latest;
-    await sleep(1_000);
   }
   return latest;
 }
 
 async function activateAndVerify(driver, extensionId, baseline) {
-  await acceptTermsEverywhere(driver);
   await openPopup(driver, extensionId);
-  await acceptTermsEverywhere(driver);
-  await openPopup(driver, extensionId);
-
-  const alreadyChanged = await waitForChangedIp(driver, baseline, 2);
-  if (alreadyChanged && alreadyChanged !== baseline) return alreadyChanged;
-
-  for (const mode of ["text", "c-switch", "role-switch", "off"]) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await acceptTermsEverywhere(driver);
     await openPopup(driver, extensionId);
-    const result = await driver.executeScript(activationScript, mode)
-      .catch(() => ({ clicked: false, control: mode }));
-    console.log(`${PROVIDER} activation via ${mode}: ${JSON.stringify(result)}`);
-    await sleep(1_500);
-
-    const changed = await waitForChangedIp(driver, baseline, 5);
-    if (changed && changed !== baseline) return changed;
-
-    await openPopup(driver, extensionId).catch(() => {});
-    await saveDiagnostics(driver, `activation-${mode}`).catch(() => {});
+    const already = await bodyText(driver);
+    if (/connected|protected|vpn is on|turn off|disconnect/i.test(already)) {
+      const changed = await waitForChangedIp(driver, baseline, 10);
+      if (changed && changed !== baseline) return changed;
+    }
+    for (const mode of ["text", "c-switch", "role-switch", "off"]) {
+      const result = await driver.executeScript(activationScript, mode).catch(() => ({ clicked: false, control: mode }));
+      console.log(`${PROVIDER} activation via ${mode}: ${JSON.stringify(result)}`);
+      await sleep(1_500);
+      const changed = await waitForChangedIp(driver, baseline, 5);
+      if (changed && changed !== baseline) return changed;
+      await openPopup(driver, extensionId).catch(() => {});
+      await saveDiagnostics(driver, `activation-${mode}`).catch(() => {});
+    }
   }
   return undefined;
 }
@@ -456,12 +394,11 @@ async function buildDriver({ restart = false } = {}) {
   if (!restart) {
     options.enableBidi();
     options.addArguments("--remote-debugging-pipe", "--enable-unsafe-extension-debugging");
+  } else {
+    options.addArguments(`--load-extension=${unpackedDirectory}`);
   }
 
-  return new Builder()
-    .forBrowser("chrome")
-    .setChromeOptions(options)
-    .build();
+  return new Builder().forBrowser("chrome").setChromeOptions(options).build();
 }
 
 await downloadAndUnpackOfficialExtension();
@@ -497,20 +434,5 @@ try {
   await driver.quit().catch(() => {});
 }
 
-await writeFile(
-  statusPath,
-  `${JSON.stringify({
-    provider: PROVIDER,
-    browser: "chrome",
-    verified: true,
-    restartVerified: true,
-    extensionId,
-    baselineIp,
-    vpnIp,
-    restartIp,
-    verifiedAt: new Date().toISOString(),
-  }, null, 2)}\n`,
-  "utf8",
-);
-
+await writeFile(statusPath, `${JSON.stringify({ provider: PROVIDER, browser: "chrome", verified: true, restartVerified: true, extensionId, extensionDirectory: unpackedDirectory, baselineIp, vpnIp, restartIp, verifiedAt: new Date().toISOString() }, null, 2)}\n`, "utf8");
 console.log(`${PROVIDER} is active and restart-persistent in chrome: ${baselineIp} -> ${restartIp}`);
