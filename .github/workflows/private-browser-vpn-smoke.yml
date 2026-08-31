@@ -32,6 +32,7 @@ jobs:
       DISPLAY: ":99"
       PRIVATE_BROWSER: ${{ matrix.browser }}
       PRIVATE_BROWSER_PROFILE_ROOT: /tmp/private-browser-profile
+      PRIVATE_BROWSER_DOWNLOAD_DIRECTORY: /tmp/private-browser/downloads
       PRIVATE_BROWSER_VPN_STATUS: /tmp/private-browser/vpn-status.json
     steps:
       - uses: actions/checkout@v5
@@ -43,34 +44,50 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm install --ignore-scripts --no-audit --no-fund
 
-      - name: Install browser and virtual display
+      - name: Resolve browser, WebDriver and virtual display
         id: browser
         shell: bash
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xvfb
+
+          ensure_driver() {
+            local command_name="$1"
+            local search_root="$2"
+            if command -v "$command_name" > /dev/null 2>&1; then
+              return 0
+            fi
+            local candidate
+            candidate="$(find "$search_root" -type f -name "$command_name" -perm -u+x -print -quit 2>/dev/null || true)"
+            test -n "$candidate" || {
+              echo "Unable to locate $command_name under $search_root" >&2
+              exit 1
+            }
+            sudo ln -sf "$candidate" "/usr/local/bin/$command_name"
+          }
+
           if [[ "$PRIVATE_BROWSER" == "firefox" ]]; then
-            npx playwright install --with-deps firefox
-            executable="$(node --input-type=module -e \
-              'import { firefox } from "playwright"; process.stdout.write(firefox.executablePath())')"
+            firefox --version
+            ensure_driver geckodriver "${GECKOWEBDRIVER:-/usr/local/share/gecko_driver}"
+            geckodriver --version
+            executable="$(command -v firefox)"
           else
-            sudo apt-get update
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xvfb
             google-chrome --version
+            ensure_driver chromedriver "${CHROMEWEBDRIVER:-/usr/local/share/chromedriver-linux64}"
+            chromedriver --version
             executable="$(command -v google-chrome)"
           fi
           test -x "$executable"
           echo "executable=$executable" >> "$GITHUB_OUTPUT"
 
-      - name: Configure Browsec force-install policy
+      - name: Stage Browsec extension
         shell: bash
-        env:
-          PRIVATE_BROWSER_EXECUTABLE: ${{ steps.browser.outputs.executable }}
         run: |
           set -euo pipefail
           if [[ "$PRIVATE_BROWSER" == "firefox" ]]; then
             extension_dir="$PRIVATE_BROWSER_PROFILE_ROOT/firefox/extensions"
-            distribution_dir="$(dirname "$PRIVATE_BROWSER_EXECUTABLE")/distribution"
-            mkdir -p "$extension_dir" "$distribution_dir"
+            mkdir -p "$extension_dir"
 
             addon_json="$(curl --fail --location --silent --show-error \
               https://addons.mozilla.org/api/v5/addons/addon/browsec/)"
@@ -86,10 +103,6 @@ jobs:
               "$xpi_url"
             test -s "$extension_dir/$extension_id.xpi"
             echo "BROWSEC_FIREFOX_EXTENSION_ID=$extension_id" >> "$GITHUB_ENV"
-
-            jq -n --arg id "$extension_id" --arg url "$xpi_url" \
-              '{policies:{ExtensionSettings:{($id):{installation_mode:"force_installed",install_url:$url}}}}' \
-              > "$distribution_dir/policies.json"
           else
             sudo mkdir -p /etc/opt/chrome/policies/managed
             sudo tee /etc/opt/chrome/policies/managed/private-browser-vpn.json > /dev/null <<'JSON'
@@ -107,7 +120,7 @@ jobs:
 
       - name: Start virtual display
         run: |
-          mkdir -p /tmp/private-browser
+          mkdir -p /tmp/private-browser "$PRIVATE_BROWSER_DOWNLOAD_DIRECTORY"
           Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp -ac \
             > /tmp/private-browser/xvfb.log 2>&1 &
           sleep 2
