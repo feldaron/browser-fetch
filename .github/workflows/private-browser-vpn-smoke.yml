@@ -1,0 +1,123 @@
+name: Smoke test private browser VPN
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/private-browser.yml
+      - .github/workflows/private-browser-vpn-smoke.yml
+      - scripts/prepare-private-vpn.mjs
+      - scripts/launch-private-browser.mjs
+      - package.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-browser-vpn-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vpn-smoke:
+    name: ${{ matrix.browser }} VPN smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        browser:
+          - firefox
+          - chrome
+    env:
+      DISPLAY: ":99"
+      PRIVATE_BROWSER: ${{ matrix.browser }}
+      PRIVATE_BROWSER_PROFILE_ROOT: /tmp/private-browser-profile
+      PRIVATE_BROWSER_VPN_STATUS: /tmp/private-browser/vpn-status.json
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install JavaScript dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Install browser and virtual display
+        id: browser
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$PRIVATE_BROWSER" == "firefox" ]]; then
+            npx playwright install --with-deps firefox
+            executable="$(node --input-type=module -e \
+              'import { firefox } from "playwright"; process.stdout.write(firefox.executablePath())')"
+          else
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xvfb
+            google-chrome --version
+            executable="$(command -v google-chrome)"
+          fi
+          test -x "$executable"
+          echo "executable=$executable" >> "$GITHUB_OUTPUT"
+
+      - name: Configure Browsec force-install policy
+        shell: bash
+        env:
+          PRIVATE_BROWSER_EXECUTABLE: ${{ steps.browser.outputs.executable }}
+        run: |
+          set -euo pipefail
+          if [[ "$PRIVATE_BROWSER" == "firefox" ]]; then
+            distribution_dir="$(dirname "$PRIVATE_BROWSER_EXECUTABLE")/distribution"
+            mkdir -p "$distribution_dir"
+            cat > "$distribution_dir/policies.json" <<'JSON'
+          {
+            "policies": {
+              "ExtensionSettings": {
+                "browsec@browsec.com": {
+                  "installation_mode": "force_installed",
+                  "install_url": "https://addons.mozilla.org/firefox/downloads/latest/browsec/latest.xpi"
+                }
+              }
+            }
+          }
+          JSON
+          else
+            sudo mkdir -p /etc/opt/chrome/policies/managed
+            sudo tee /etc/opt/chrome/policies/managed/private-browser-vpn.json > /dev/null <<'JSON'
+          {
+            "ExtensionSettings": {
+              "omghfjlpggmjjaagoclmmobgdodcjboh": {
+                "installation_mode": "force_installed",
+                "update_url": "https://clients2.google.com/service/update2/crx",
+                "toolbar_pin": "force_pinned"
+              }
+            }
+          }
+          JSON
+          fi
+
+      - name: Start virtual display
+        run: |
+          mkdir -p /tmp/private-browser
+          Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp -ac \
+            > /tmp/private-browser/xvfb.log 2>&1 &
+          sleep 2
+
+      - name: Activate and verify Browsec
+        env:
+          PRIVATE_BROWSER_EXECUTABLE: ${{ steps.browser.outputs.executable }}
+        run: |
+          set -o pipefail
+          node scripts/prepare-private-vpn.mjs 2>&1 | tee /tmp/private-browser/vpn-setup.log
+          jq -e '.provider == "Browsec" and .verified == true and .restartVerified == true and (.baselineIp != .restartIp)' \
+            "$PRIVATE_BROWSER_VPN_STATUS" > /dev/null
+
+      - name: Upload VPN smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-browser-vpn-${{ matrix.browser }}-${{ github.run_id }}
+          path: /tmp/private-browser/
+          if-no-files-found: warn
+          retention-days: 3
