@@ -1,4 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import path from "node:path";
 import { chromium, firefox } from "playwright";
 
@@ -23,6 +24,25 @@ const statusPath = process.env.PRIVATE_BROWSER_VPN_STATUS ??
 await mkdir(profileDirectory, { recursive: true });
 await mkdir(path.dirname(statusPath), { recursive: true });
 
+function extractIp(text) {
+  const trimmed = text.trim();
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    const value = typeof parsed === "string" ? parsed : parsed?.ip;
+    if (typeof value === "string" && isIP(value.trim())) return value.trim();
+  } catch {
+    // Plain-text IP endpoints are handled below.
+  }
+
+  for (const token of trimmed.split(/\s+/)) {
+    const candidate = token.replace(/^[^0-9a-f:.]+|[^0-9a-f:.]+$/gi, "");
+    if (candidate && isIP(candidate)) return candidate;
+  }
+
+  return undefined;
+}
+
 async function fetchIpOutsideBrowser() {
   const endpoints = [
     "https://api.ipify.org?format=json",
@@ -37,9 +57,8 @@ async function fetchIpOutsideBrowser() {
         signal: AbortSignal.timeout(10_000),
       });
       if (!response.ok) continue;
-      const text = (await response.text()).trim();
-      const match = text.match(/(?:\d{1,3}\.){3}\d{1,3}|[0-9a-f:]{2,}/i);
-      if (match) return match[0];
+      const ip = extractIp(await response.text());
+      if (ip) return ip;
     } catch {
       // Try the next independent IP service.
     }
@@ -168,9 +187,8 @@ async function fetchIpThroughBrowser(context) {
     const page = await context.newPage();
     try {
       await page.goto(endpoint, { waitUntil: "domcontentloaded", timeout: 20_000 });
-      const text = (await bodyText(page)).trim();
-      const match = text.match(/(?:\d{1,3}\.){3}\d{1,3}|[0-9a-f:]{2,}/i);
-      if (match) return match[0];
+      const ip = extractIp(await bodyText(page));
+      if (ip) return ip;
     } catch {
       // Try another endpoint through the browser/VPN route.
     } finally {
