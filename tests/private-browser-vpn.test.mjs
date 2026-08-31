@@ -36,7 +36,9 @@ test("Firefox stages the official add-on and persists its WebDriver profile", as
   assert.match(vpnSetup, /restartVerified/);
   assert.doesNotMatch(vpnSetup, /about:debugging#\/runtime\/this-firefox/);
   assert.match(vpnSetup, /setContext\("chrome"\)/);
-  assert.match(vpnSetup, /getSystemPrincipal/);
+  assert.match(vpnSetup, /ExtensionParent\.GlobalManager\.getExtension/);
+  assert.match(vpnSetup, /ExtensionStorageIDB\.selectBackend/);
+  assert.match(vpnSetup, /ExtensionStorageIDB\.notifyListeners/);
 });
 
 test("Chrome force-installs the Store extension and launches only its verified persistent profile", async () => {
