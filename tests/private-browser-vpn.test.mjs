@@ -47,10 +47,9 @@ test("Firefox stages the official add-on and requires a generated low-level PAC 
   assert.match(vpnSetup, /lowLevelPac/);
   assert.match(vpnSetup, /globalReturn/);
   assert.match(vpnSetup, /countryServers/);
-  assert.doesNotMatch(vpnSetup, /usable free server list before activation/);
 });
 
-test("Chrome force-installs Browsec and attaches to its MV3 worker through browser CDP", async () => {
+test("Chrome force-installs Browsec and activates it through the real managed popup", async () => {
   const [workflow, smokeWorkflow, launcher, vpnSetup, vpnChrome] = await Promise.all([
     readFile(workflowPath, "utf8"),
     readFile(smokeWorkflowPath, "utf8"),
@@ -68,26 +67,16 @@ test("Chrome force-installs Browsec and attaches to its MV3 worker through brows
   }
 
   assert.match(vpnChrome, /const EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh"/);
-  assert.match(vpnChrome, /service_worker/);
-  assert.match(vpnChrome, /findServiceWorker/);
-  assert.match(vpnChrome, /attachServiceWorker/);
-  assert.match(vpnChrome, /Target\.attachToTarget/);
-  assert.match(vpnChrome, /evaluateWorker/);
-  assert.match(vpnChrome, /chrome\.storage\.local/);
-  assert.match(vpnChrome, /chrome\.proxy\.settings\.get/);
-  assert.match(vpnChrome, /startup terms and conditions accepted shown/);
-  assert.match(vpnChrome, /First start accept terms and conditions: phase/);
-  assert.match(vpnChrome, /mode: 'direct'/);
-  assert.match(vpnChrome, /broken: false/);
-  assert.match(vpnChrome, /lowLevelPac/);
-  assert.match(vpnChrome, /globalReturn/);
-  assert.match(vpnChrome, /managed normal Chrome public IP/);
+  assert.match(vpnChrome, /selenium-webdriver/);
+  assert.match(vpnChrome, /chrome-extension:\/\/\$\{EXTENSION_ID\}\/popup\/popup\.html/);
+  assert.match(vpnChrome, /activationScript/);
+  assert.match(vpnChrome, /acceptTermsScript/);
+  assert.match(vpnChrome, /--enable-unsafe-extension-debugging/);
+  assert.match(vpnChrome, /managed Chrome public IP/);
   assert.match(vpnChrome, /normal Chrome restart/);
-  assert.doesNotMatch(vpnChrome, /activationExpression/);
-  assert.doesNotMatch(vpnChrome, /acceptTermsExpression/);
-  assert.doesNotMatch(vpnChrome, /waitForUkServerReadiness/);
+  assert.doesNotMatch(vpnChrome, /Target\.attachToTarget/);
   assert.doesNotMatch(vpnChrome, /webExtension\.install/);
-  assert.doesNotMatch(vpnChrome, /enableBidi/);
+  assert.doesNotMatch(vpnChrome, /--load-extension=/);
 
   assert.match(launcher, /const CHROME_EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh"/);
   assert.match(launcher, /vpnStatus\?\.extensionId !== CHROME_EXTENSION_ID/);
