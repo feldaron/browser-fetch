@@ -126,6 +126,7 @@ if (browserName === "chrome") {
       .setFirefoxOptions(options)
       .setFirefoxService(service)
       .build();
+    await driver.manage().setTimeouts({ pageLoad: 12_000, script: 20_000 });
 
     if (!restart) {
       await readFile(firefoxXpiPath).catch(() => {
@@ -177,6 +178,7 @@ if (browserName === "chrome") {
   }
 
   async function activateBrowsec(driver) {
+    console.log("Activating Browsec through Firefox native extension storage.");
     await driver.setContext("chrome");
     let result;
     try {
