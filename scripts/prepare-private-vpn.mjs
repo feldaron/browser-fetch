@@ -1,153 +1,72 @@
-import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { promisify } from "node:util";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const execFileAsync = promisify(execFile);
-const CHROME_EXTENSION_ID = "omghfjlpggmjjaagoclmmobgdodcjboh";
-const FIREFOX_EXTENSION_ID = process.env.BROWSEC_FIREFOX_EXTENSION_ID ?? "browsec@browsec.com";
-const FIREFOX_EXTENSION_UUID = "8f9b7b1a-6d40-4f5c-a7db-5e8f86f24691";
-
 const browserName = (process.env.PRIVATE_BROWSER ?? "firefox").toLowerCase();
-const profileRoot = process.env.PRIVATE_BROWSER_PROFILE_ROOT ?? "/tmp/private-browser-profile";
-const diagnosticsDirectory = path.dirname(
-  process.env.PRIVATE_BROWSER_VPN_STATUS ?? "/tmp/private-browser/vpn-status.json",
-);
+if (!["chrome", "firefox"].includes(browserName)) {
+  throw new Error(`Unsupported private browser: ${browserName}`);
+}
 
-if (browserName === "firefox") {
+if (browserName === "chrome") {
+  await import("./prepare-private-vpn-chrome.mjs");
+} else {
+  const firefoxExtensionId = process.env.BROWSEC_FIREFOX_EXTENSION_ID ?? "browsec@browsec.com";
+  const profileRoot = process.env.PRIVATE_BROWSER_PROFILE_ROOT ?? "/tmp/private-browser-profile";
+
   process.env.PRIVATE_BROWSER_FIREFOX_VPN_XPI ??= path.join(
     profileRoot,
     "firefox",
     "extensions",
-    `${FIREFOX_EXTENSION_ID}.xpi`,
+    `${firefoxExtensionId}.xpi`,
   );
-} else if (browserName === "chrome") {
-  const executable = process.env.PRIVATE_BROWSER_EXECUTABLE ?? "google-chrome";
-  const crxPath = process.env.PRIVATE_BROWSER_CHROME_VPN_CRX ??
-    path.join(diagnosticsDirectory, "browsec-chrome.crx");
-  process.env.PRIVATE_BROWSER_CHROME_VPN_CRX = crxPath;
 
-  await mkdir(path.dirname(crxPath), { recursive: true });
-  const { stdout, stderr } = await execFileAsync(executable, ["--version"]);
-  const versionText = `${stdout}\n${stderr}`;
-  const version = versionText.match(/\d+\.\d+\.\d+\.\d+/)?.[0];
-  if (!version) throw new Error(`Unable to determine Chrome version from: ${versionText.trim()}`);
+  // Firefox assigns a runtime moz-extension:// UUID when Browsec is installed.
+  // Firefox 154 no longer exposes the old privileged WebExtensionPolicy lookup to
+  // WebDriver scripts, so resolve the UUID from Firefox's own about:debugging UI.
+  const runtimeSourceUrl = new URL("./prepare-private-vpn-runtime.mjs", import.meta.url);
+  const original = await readFile(runtimeSourceUrl, "utf8");
+  const replacement = `async function resolveFirefoxExtensionUuid(driver) {
+  const originalHandle = await driver.getWindowHandle().catch(() => undefined);
+  const originalUrl = await driver.getCurrentUrl().catch(() => "about:blank");
 
-  const params = new URLSearchParams({
-    response: "redirect",
-    prodversion: version,
-    acceptformat: "crx2,crx3",
-    x: `id=${CHROME_EXTENSION_ID}&uc`,
-  });
-  const response = await fetch(`https://clients2.google.com/service/update2/crx?${params}`, {
-    redirect: "follow",
-    headers: { "user-agent": `Mozilla/5.0 Chrome/${version}` },
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok) throw new Error(`Unable to download Browsec CRX: HTTP ${response.status}`);
-  const crx = Buffer.from(await response.arrayBuffer());
-  if (crx.length < 1_000) throw new Error("Downloaded Browsec CRX is unexpectedly small.");
-  await writeFile(crxPath, crx);
-  console.log(`Downloaded official Browsec Chrome package (${crx.length} bytes) for provenance.`);
-} else {
-  throw new Error(`Unsupported private browser: ${browserName}`);
-}
+  try {
+    await driver.get("about:debugging#/runtime/this-firefox");
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await sleep(500);
+      const text = await bodyText(driver);
+      const source = await driver.getPageSource().catch(() => "");
+      const markerIndex = text.indexOf(FIREFOX_EXTENSION_ID);
+      const nearby = markerIndex >= 0
+        ? text.slice(Math.max(0, markerIndex - 2_000), markerIndex + 4_000)
+        : text;
 
-const runtimeSourcePath = new URL("./prepare-private-vpn-runtime.mjs", import.meta.url);
-let runtimeSource = await readFile(runtimeSourcePath, "utf8");
-
-runtimeSource = runtimeSource.replace(
-  /async function resolveFirefoxExtensionUuid\(driver\) \{[\s\S]*?\n\}\n\nfunction popupUrl\(\)/,
-  `async function resolveFirefoxExtensionUuid(driver) {
-  firefoxExtensionUuid = "${FIREFOX_EXTENSION_UUID}";
-  console.log(\`Using configured Firefox Browsec runtime UUID: \${firefoxExtensionUuid}\`);
-}
-
-function popupUrl()`,
-);
-runtimeSource = runtimeSource.replace(
-  `.setPreference("extensions.enabledScopes", 15);`,
-  `.setPreference("extensions.enabledScopes", 15)\n    .setPreference("extensions.webextensions.uuids", JSON.stringify({\n      [FIREFOX_EXTENSION_ID]: "${FIREFOX_EXTENSION_UUID}",\n    }));`,
-);
-
-// Chrome uses the same managed-policy installation as the real private-browser
-// workflow. Do not also inject a transient WebDriver copy of Browsec.
-runtimeSource = runtimeSource.replace(
-  `      options.addExtensions(chromeCrxPath);`,
-  `      console.log("Chrome Browsec package verified; managed policy performs installation.");`,
-);
-
-const chromeWorkerHelpers = `
-async function chromeWorkerEvaluate(driver, expression) {
-  const capabilities = await driver.getCapabilities();
-  const chromeOptions = capabilities.get("goog:chromeOptions") ?? {};
-  const debuggerAddress = chromeOptions.debuggerAddress;
-  if (!debuggerAddress) throw new Error("ChromeDriver did not expose a DevTools debugger address.");
-
-  let lastTargets = [];
-  for (let attempt = 0; attempt < 90; attempt += 1) {
-    // Visiting a normal page gives managed extension installation/startup events
-    // time to complete without navigating to a blocked chrome-extension:// URL.
-    if (attempt === 0) {
-      await driver.get("https://example.com/").catch(() => {});
+      const fromText = nearby.match(/Internal UUID\\s+([0-9a-f-]{36})/i)?.[1];
+      const fromManifest = source.match(/moz-extension:\\/\\/([0-9a-f-]{36})\\/manifest\\.json/i)?.[1];
+      const uuid = fromText ?? fromManifest;
+      if (uuid) {
+        firefoxExtensionUuid = uuid;
+        console.log(\`Resolved Firefox Browsec runtime UUID from about:debugging: \${uuid}\`);
+        return;
+      }
     }
-    lastTargets = await fetch(\`http://\${debuggerAddress}/json/list\`)
-      .then((response) => response.json())
-      .catch(() => []);
-    const target = lastTargets.find((entry) =>
-      ["service_worker", "background_page"].includes(entry.type) &&
-      String(entry.url || "").startsWith("chrome-extension://${CHROME_EXTENSION_ID}/") &&
-      entry.webSocketDebuggerUrl
-    );
-    if (!target) {
-      await sleep(1_000);
-      continue;
-    }
-
-    const socket = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Timed out opening Browsec DevTools target.")), 5_000);
-      socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
-      socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("Unable to open Browsec DevTools target.")); }, { once: true });
-    });
-
-    try {
-      const id = 1;
-      const resultPromise = new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("Timed out evaluating Browsec service worker.")), 10_000);
-        const onMessage = (event) => {
-          const message = JSON.parse(String(event.data));
-          if (message.id !== id) return;
-          clearTimeout(timer);
-          socket.removeEventListener("message", onMessage);
-          if (message.error) reject(new Error(message.error.message || "Browsec DevTools evaluation failed."));
-          else resolve(message.result);
-        };
-        socket.addEventListener("message", onMessage);
-      });
-      socket.send(JSON.stringify({
-        id,
-        method: "Runtime.evaluate",
-        params: { expression, awaitPromise: true, returnByValue: true },
-      }));
-      const response = await resultPromise;
-      const exception = response?.exceptionDetails;
-      if (exception) throw new Error(exception.text || "Browsec service-worker evaluation threw.");
-      return response?.result?.value;
-    } finally {
-      socket.close();
-    }
+  } finally {
+    if (originalHandle) await driver.switchTo().window(originalHandle).catch(() => {});
+    await driver.get(originalUrl || "about:blank").catch(() => {});
   }
 
-  const summary = lastTargets.map((entry) => ({ type: entry.type, url: entry.url })).slice(0, 30);
-  throw new Error(\`Browsec Chrome service worker did not become available. Targets: \${JSON.stringify(summary)}\`);
+  throw new Error("Firefox did not expose Browsec's runtime extension UUID in about:debugging.");
 }
-`;
-runtimeSource = runtimeSource.replace(
-  `async function activateAndVerify(driver, baseline) {`,
-  `${chromeWorkerHelpers}\nasync function activateAndVerify(driver, baseline) {\n  if (browserName === "chrome") {\n    const result = await chromeWorkerEvaluate(driver, \`(async () => {\n      await chrome.storage.local.set({\n        "startup terms and conditions accepted shown": true,\n        "First start accept terms and conditions: phase": 2,\n      });\n      if (!self.highLevelPac || typeof self.highLevelPac.enable !== "function") {\n        throw new Error("Browsec highLevelPac API is not ready.");\n      }\n      const next = await self.highLevelPac.enable();\n      return { mode: next?.mode, country: next?.country };\n    })()\`);\n    if (result?.mode !== "proxy" || typeof result?.country !== "string") {\n      throw new Error(\`Browsec did not report a valid proxy state: \${JSON.stringify(result)}\`);\n    }\n    console.log(\`Browsec Chrome service worker enabled VPN state: \${JSON.stringify(result)}\`);\n    await sleep(3_000);\n    return waitForChangedIp(driver, baseline, 20);\n  }`,
-);
 
-const patchedRuntimeUrl = new URL("./.prepare-private-vpn-runtime.patched.mjs", import.meta.url);
-await writeFile(patchedRuntimeUrl, runtimeSource, "utf8");
-await import(`${patchedRuntimeUrl.href}?run=${Date.now()}`);
+function popupUrl()`;
+
+  const patched = original.replace(
+    /async function resolveFirefoxExtensionUuid\(driver\) \{[\s\S]*?\n\}\n\nfunction popupUrl\(\)/,
+    replacement,
+  );
+  if (patched === original) {
+    throw new Error("Unable to patch the Firefox Browsec UUID resolver.");
+  }
+
+  const patchedRuntimeUrl = new URL("./.prepare-private-vpn-firefox-runtime.mjs", import.meta.url);
+  await writeFile(patchedRuntimeUrl, patched, "utf8");
+  await import(`${patchedRuntimeUrl.href}?run=${Date.now()}`);
+}
