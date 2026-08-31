@@ -180,13 +180,26 @@ if (browserName === "chrome") {
     const target = `moz-extension://${uuid}/popup/popup.html`;
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
-        await driver.get(target);
+        await driver.setContext("chrome");
+        const loaded = await driver.executeScript(`
+          const target = arguments[0];
+          const { Services } = ChromeUtils.importESModule('resource://gre/modules/Services.sys.mjs');
+          const browser = window.gBrowser?.selectedBrowser;
+          if (!browser) return false;
+          browser.loadURI(target, {
+            triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
+          });
+          return true;
+        `, target);
+        await driver.setContext("content");
+        if (!loaded) throw new Error("Firefox browser chrome did not expose the selected tab.");
         await sleep(500);
         if ((await driver.getCurrentUrl()).startsWith(target)) return;
       } catch {}
+      finally { await driver.setContext("content").catch(() => {}); }
       await sleep(600);
     }
-    throw new Error("Firefox could not open Browsec's extension page.");
+    throw new Error("Firefox could not open Browsec's extension page through browser chrome.");
   }
 
   async function activateBrowsec(driver, uuid) {
