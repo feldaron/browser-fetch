@@ -4,7 +4,6 @@ import path from "node:path";
 
 const FIREFOX_EXTENSION_ID = process.env.BROWSEC_FIREFOX_EXTENSION_ID ??
   "browsec@browsec.com";
-const FIREFOX_EXTENSION_UUID = "8f9b7b1a-6d40-4f5c-a7db-5e8f86f24691";
 
 const rawUrl = process.argv[2] ?? "https://www.currys.co.uk/";
 const startUrl = new URL(rawUrl);
@@ -42,9 +41,10 @@ if (browserName === "firefox") {
       'user_pref("browser.download.alwaysOpenPanel", false);',
       'user_pref("extensions.autoDisableScopes", 0);',
       'user_pref("extensions.enabledScopes", 15);',
-      `user_pref("extensions.webextensions.uuids", ${JSON.stringify(JSON.stringify({
-        [FIREFOX_EXTENSION_ID]: FIREFOX_EXTENSION_UUID,
-      }))});`,
+      // Firefox owns extensions.webextensions.uuids. The VPN provisioning step
+      // persists Firefox's generated Browsec UUID in prefs.js; do not override it
+      // here or the installed add-on can lose its moz-extension origin on restart.
+      `// Browsec add-on ID: ${FIREFOX_EXTENSION_ID}`,
       "",
     ].join("\n"),
     "utf8",
