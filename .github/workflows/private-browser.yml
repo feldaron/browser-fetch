@@ -141,22 +141,25 @@ jobs:
             extension_dir="$PRIVATE_BROWSER_PROFILE_ROOT/firefox/extensions"
             distribution_dir="$(dirname "$PRIVATE_BROWSER_EXECUTABLE")/distribution"
             mkdir -p "$extension_dir" "$distribution_dir"
-            curl --fail --location --silent --show-error \
-              --output "$extension_dir/browsec@browsec.com.xpi" \
-              https://addons.mozilla.org/firefox/downloads/latest/browsec/latest.xpi
-            test -s "$extension_dir/browsec@browsec.com.xpi"
-            cat > "$distribution_dir/policies.json" <<'JSON'
-          {
-            "policies": {
-              "ExtensionSettings": {
-                "browsec@browsec.com": {
-                  "installation_mode": "force_installed",
-                  "install_url": "https://addons.mozilla.org/firefox/downloads/latest/browsec/latest.xpi"
-                }
-              }
+
+            addon_json="$(curl --fail --location --silent --show-error \
+              https://addons.mozilla.org/api/v5/addons/addon/browsec/)"
+            extension_id="$(jq -er '.guid | strings | select(length > 0)' <<<"$addon_json")"
+            xpi_url="$(jq -er '.current_version.file.url | strings | select(length > 0)' <<<"$addon_json")"
+            [[ "$extension_id" =~ ^[A-Za-z0-9._@{}-]+$ ]] || {
+              echo "AMO returned an invalid Browsec Firefox extension ID" >&2
+              exit 1
             }
-          }
-          JSON
+
+            curl --fail --location --silent --show-error \
+              --output "$extension_dir/$extension_id.xpi" \
+              "$xpi_url"
+            test -s "$extension_dir/$extension_id.xpi"
+            echo "BROWSEC_FIREFOX_EXTENSION_ID=$extension_id" >> "$GITHUB_ENV"
+
+            jq -n --arg id "$extension_id" --arg url "$xpi_url" \
+              '{policies:{ExtensionSettings:{($id):{installation_mode:"force_installed",install_url:$url}}}}' \
+              > "$distribution_dir/policies.json"
           else
             sudo mkdir -p /etc/opt/chrome/policies/managed
             sudo tee /etc/opt/chrome/policies/managed/private-browser-vpn.json > /dev/null <<'JSON'
